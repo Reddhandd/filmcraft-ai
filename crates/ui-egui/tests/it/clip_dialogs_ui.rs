@@ -466,3 +466,16 @@ fn clip_context_menu_adds_a_marker_at_the_playhead_with_one_undo() {
         assert_eq!(serde_json::to_value(&*d.app().session.project).unwrap(), serde_json::to_value(&*after).unwrap());
     }
 }
+
+#[test]
+fn close_all_projects_cancel_preserves_dirty_project() {
+    let mut d = Driver::new();
+    let c = d.v1(0);
+    d.exec("timeline.select", json!({"clips": [c.id.0]}));
+    d.menu("edit.label.yellow");
+    let before = d.app().session.project.clone();
+    assert_eq!(d.menu("file.closeAllProjects")["dialog"], "closeProject");
+    d.click("closeProject.cancel");
+    assert_eq!(*d.app().session.project, *before);
+    assert!(d.app().session.is_dirty());
+}

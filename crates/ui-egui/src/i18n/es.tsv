@@ -90,6 +90,7 @@
 	Composite Video	Video compuesto
 	Consolidate Duplicates	Consolidar duplicados
 	Copy	Copiar
+	Copy Transition	Copiar transición
 	Copy Paste Includes Sequence Markers	Copiar y pegar incluye marcadores de secuencia
 	Create Captions from Transcript…	Crear subtítulos a partir de la transcripción…
 	Create Multi-Camera Source Sequence…	Crear secuencia de origen multicámara…
@@ -239,6 +240,7 @@
 	Optical Flow	Flujo óptico
 	Overwrite	Sobrescribir
 	Paste	Pegar
+	Paste Transition	Pegar transición
 	Paste Attributes…	Pegar atributos…
 	Paste Insert	Pegar e insertar
 	Paused Resolution	Resolución en pausa
@@ -3628,3 +3630,55 @@
 	No matching text.	Ningún texto coincide.
 	H.265 (HEVC) needs a hardware encoder (NVENC on NVIDIA GPUs, VideoToolbox on macOS); none was found on this machine, and FilmCraft has no software H.265 encoder yet. Choose H.264 or ProRes instead.	H.265 (HEVC) necesita un codificador por hardware (NVENC en GPU NVIDIA, VideoToolbox en macOS); no se encontró ninguno en este equipo y FilmCraft aún no tiene un codificador H.265 por software. Elija H.264 o ProRes.
 	AV1 needs a hardware encoder; none was found on this machine, and FilmCraft has no software AV1 encoder yet.	AV1 necesita un codificador por hardware; no se encontró ninguno en este equipo y FilmCraft aún no tiene un codificador AV1 por software.
+	Local Codex connection	Conexión local de Codex
+	Connection check only: verifies inspection tools. Chat and AI edits are not enabled yet.	Solo comprueba la conexión y las herramientas de inspección. El chat y la edición con IA aún no están habilitados.
+	Disconnected	Desconectado
+	Checking Codex and FilmCraft bridge…	Comprobando Codex y el puente de FilmCraft…
+	Codex connected; FilmCraft inspection tools verified.	Codex conectado; herramientas de inspección de FilmCraft verificadas.
+	Connect Codex	Conectar Codex
+	Disconnect Codex	Desconectar Codex
+	Codex connections require the desktop app.	Las conexiones de Codex requieren la aplicación de escritorio.
+	Ask Codex about this project or request an edit. Proposed edits require your approval.	Pregunta a Codex sobre este proyecto o solicita una edición. Los cambios propuestos requieren tu aprobación.
+	Send	Enviar
+	Review proposed edit	Revisar edición propuesta
+	Validated on a project copy. Apply creates a normal Undo step.	Validado en una copia del proyecto. Aplicar crea un paso normal de Deshacer.
+	Apply proposed edit	Aplicar edición propuesta
+	Reject proposed edit	Rechazar edición propuesta
+	Message to Codex	Mensaje para Codex
+	Codex default	Predeterminado de Codex
+	You (voice)	Tú (voz)
+	Codex (voice)	Codex (voz)
+	Voice On	Activar voz
+	Voice Off	Desactivar voz
+	Voice off	Voz desactivada
+	Connecting Codex voice…	Conectando la voz de Codex…
+	Voice on — microphone active	Voz activada — micrófono activo
+	Stopping voice…	Deteniendo la voz…
+	Closing the console stops voice. Edits still require Apply.	Cerrar la consola detiene la voz. Las ediciones siguen requiriendo Aplicar.
+	Select Console Model	Seleccionar modelo de consola
+	Send Console Message	Enviar mensaje de consola
+	Cancel Console Turn	Cancelar turno de consola
+	Apply Proposed Edit	Aplicar edición propuesta
+	Reject Proposed Edit	Rechazar edición propuesta
+	Turn Console Voice On	Activar voz de consola
+	Turn Console Voice Off	Desactivar voz de consola
+	New Conversation	Nueva conversación
+	Resume Saved Conversation	Reanudar conversación guardada
+	Resume Codex Session	Reanudar sesión de Codex
+	View/Edit Memory	Ver/editar memoria
+	Save Memory	Guardar memoria
+	Save the project to enable memory and saved conversations.	Guarda el proyecto para habilitar la memoria y las conversaciones guardadas.
+	Memory loads into new and resumed conversations. Save changes before continuing.	La memoria se carga en conversaciones nuevas y reanudadas. Guarda los cambios antes de continuar.
+	Project memory	Memoria del proyecto
+	No saved conversations for this project.	No hay conversaciones guardadas para este proyecto.
+	Reload from Disk	Recargar desde disco
+	Reload from Disk discards unsaved memory changes and disconnects Codex.	Recargar desde disco descarta los cambios de memoria sin guardar y desconecta Codex.
+	Project memory loaded; inspecting the current project.	Memoria del proyecto cargada; inspeccionando el proyecto actual.
+	Microphone input channel	Canal de entrada del micrófono
+	Microphone level	Nivel del micrófono
+	Audio sent to Codex	Audio enviado a Codex
+	Microphone paused during the spoken reply.	Micrófono en pausa durante la respuesta hablada.
+	Editing is direct. Use Undo to reverse edits.	La edición es directa. Usa Deshacer para revertir las ediciones.
+	Local conversation storage is unavailable. Check the application data folder.	El almacenamiento local de conversaciones no está disponible. Revisa la carpeta de datos de la aplicación.
+
+	Ask Codex about this project or request an edit.	Pregunta a Codex sobre este proyecto o solicita una edición.

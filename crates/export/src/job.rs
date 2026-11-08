@@ -253,6 +253,7 @@ impl Exporter {
         let pipe = Arc::new(Pipeline::new(project.clone(), seq, &settings, hdr_out)?);
         let (f0, f1) = frame_span(pipe.rate, range);
         let nframes = (f1 - f0) as u64;
+        progress.set_phase(crate::ProgressPhase::Processing);
         if !settings.part_of_batch {
             progress.total.store(nframes * if two_pass { 2 } else { 1 }, Ordering::Relaxed);
             progress.set_status(format!("Exporting {} frames ({})", nframes, settings.format.label()));
@@ -481,6 +482,7 @@ impl Exporter {
             self.next = self.f0;
             return Ok(Step::Progress);
         }
+        progress.set_phase(crate::ProgressPhase::Finalizing);
         let finishing = web_time::Instant::now();
         let mixed = self.audio.as_mut().and_then(|a| a.rest(sources));
         if filmcraft_media::pending::take() {
@@ -502,15 +504,26 @@ impl Exporter {
                 mux.set_sample_entry(at, entry).map_err(|e| ExportError::Io(e.to_string()))?;
             }
         }
+        let aac_timing = if self.audio.is_some() && self.settings.audio_codec() == AudioCodec::Aac {
+            match (&self.audio, &self.aenc) {
+                (Some(audio), Some(encoder)) => Some((audio.sample_count()?, audio.sr, encoder.priming(), encoder.frame_size())),
+                _ => return Err(ExportError::Encode("AAC export has no audio encoder".into())),
+            }
+        } else {
+            None
+        };
         let (bytes, extra_files) = match self.mxf.take() {
             Some(m) => m.finish(&self.settings)?,
             None => {
-                let w = self
+                let mut w = self
                     .mux
                     .take()
                     .ok_or_else(|| ExportError::Encode("internal: the container writer was not created".into()))?
                     .finish()
                     .map_err(|e| ExportError::Io(e.to_string()))?;
+                if let Some((samples, rate, priming, packet)) = aac_timing {
+                    w.finalize_aac_timing(samples, rate, priming, packet)?;
+                }
                 (w.finish(&self.settings)?, Vec::new())
             }
         };

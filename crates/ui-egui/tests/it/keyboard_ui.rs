@@ -456,3 +456,16 @@ fn shift_alt_click_toggles_only_the_clicked_linked_side() {
         assert_eq!(*d.app().session.project, *before, "selection does not edit the document");
     }
 }
+
+#[test]
+fn timeline_enter_returns_to_zero_without_starting_a_render() {
+    let mut d = Driver::new();
+    d.focus("Timeline");
+    d.exec("playhead.set", json!({"seconds":5}));
+    let project = d.app().session.project.clone();
+    let jobs = d.app().session.jobs.len();
+    d.key("Enter");
+    assert_eq!(d.app().session.playhead(), filmcraft_time::Tick::ZERO);
+    assert_eq!(d.app().session.jobs.len(), jobs);
+    assert_eq!(*d.app().session.project, *project);
+}

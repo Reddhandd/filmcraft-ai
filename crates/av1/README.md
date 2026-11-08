@@ -76,6 +76,13 @@ independent). Results never depend on scheduling (the oracle tests compare 1 thr
 and libdav1d). With frame threads, pictures may be returned by a
 later `decode_pts` call or by `flush`; each carries the `pts` of the temporal unit that showed it.
 
+Frame jobs catch unexpected decoding panics and publish an error to both their picture and
+reference slots. Output readers and dependent frames receive the failure, while the worker can
+continue with independent frames. Synthetic regressions in `src/decoder.rs` inject failures before
+decoding and after setup, check both completion slots and a dependent frame, then verify that the
+same worker processes another frame and the decoder shuts down within a deadline. The inline
+path is covered as well, including builds without the `threads` feature.
+
 `tests/it/perf.rs` (ignored) prints single-threaded fps (thread CPU time), per-stage ms/frame
 (`Decoder::stats()`) and all-core fps with its per-stage ms/frame for 1080p fixtures (key frames,
 GOPs, tiles, low delay) and a single-tile 2160p GOP; `AV1_PERF_ONLY=a,b` picks fixtures. The hot loops (sub-pixel filters,

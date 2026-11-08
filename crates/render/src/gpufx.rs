@@ -32,6 +32,13 @@ pub struct Resample {
 /// One evaluated effect.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FxOp {
+    Noise {
+        amount: f32,
+        grain: f32,
+        colored: bool,
+        clip: bool,
+        seed: u64,
+    },
     BrightnessContrast {
         br: f32,
         co: f32,
@@ -201,6 +208,7 @@ pub enum FxOp {
 
 /// Effect ids [`FxOp::eval`] understands (the GPU-capable standard effects).
 pub const GPU_EFFECTS: &[&str] = &[
+    "noise",
     "brightness_contrast",
     "proc_amp",
     "tint",
@@ -266,6 +274,13 @@ impl FxOp {
             return None;
         }
         Some(match e.effect.as_str() {
+            "noise" => FxOp::Noise {
+                amount: f(e, "amount", cx) / 100.0,
+                grain: (f(e, "grain_size", cx).max(1.0) * cx.px_scale).max(1.0),
+                colored: b(e, "color"),
+                clip: b(e, "clip"),
+                seed: crate::effects::noise_frame_seed(cx),
+            },
             "brightness_contrast" => FxOp::BrightnessContrast { br: f(e, "brightness", cx) / 100.0 * 0.4, co: 1.0 + f(e, "contrast", cx) / 100.0 },
             "proc_amp" => FxOp::ProcAmp {
                 br: f(e, "brightness", cx) / 100.0 * 0.4,
@@ -590,6 +605,7 @@ impl FxOp {
     pub fn gpu_ok(&self) -> bool {
         let fin = |v: &[f32]| v.iter().all(|x| x.is_finite());
         match self {
+            FxOp::Noise { amount, grain, .. } => amount.is_finite() && grain.is_finite() && *grain >= 1.0,
             FxOp::BrightnessContrast { br, co } => fin(&[*br, *co]),
             FxOp::ProcAmp { br, co, hue, sat } => fin(&[*br, *co, *hue, *sat]),
             FxOp::Tint { black, white, amount } => fin(black) && fin(white) && amount.is_finite(),
@@ -637,6 +653,7 @@ impl FxOp {
             return;
         }
         match self {
+            FxOp::Noise { amount, grain, colored, clip, seed } => crate::effects::apply_noise(img, *amount, *grain, *colored, *clip, *seed),
             FxOp::BrightnessContrast { br, co } => {
                 let (br, co) = (*br, *co);
                 img.map_rgb(|c, _, _| {
@@ -959,10 +976,10 @@ impl FxOp {
                     v = v.map(|q| (q - b0) / (w0 - b0).max(1e-3));
                     // highlights / shadows: luma-weighted lift/compress, hue preserving
                     let l = 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
-                    let ws = (1.0 - l).clamp(0.0, 1.0).powi(3);
+                    let ws = crate::gpufx::black_anchored_shadow_weight(l);
                     let whl = l.clamp(0.0, 1.0).powi(3);
                     let nl = (l + sh * 0.35 * ws + hl * 0.35 * whl).max(0.0);
-                    if l > 1e-5 {
+                    if l > 0.0 {
                         let k = nl / l;
                         v = v.map(|q| q * k);
                     }
@@ -1006,6 +1023,17 @@ impl FxOp {
             }
         }
     }
+}
+
+/// Smoothly anchor the shadow lift at black. A constant lift divided by vanishing luma
+/// amplifies channel residue after the black endpoint, producing colored flashes. Below
+/// 5% of the encoded grading signal, a smoothstep toe makes that lift vanish quadratically.
+/// Above that toe, preserve the existing shadow weight exactly. This is an editor response
+/// curve, not a photographic stock simulation; HDR uses its normalized grading signal.
+#[inline]
+pub(crate) fn black_anchored_shadow_weight(l: f32) -> f32 {
+    let toe = (l / 0.05).clamp(0.0, 1.0);
+    (1.0 - l).clamp(0.0, 1.0).powi(3) * (toe * toe * (3.0 - 2.0 * toe))
 }
 
 /// Horizontal scale of the Lumetri vignette's coordinates for a Roundness of `vround`

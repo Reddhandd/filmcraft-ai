@@ -763,6 +763,7 @@ pub fn render_audio(s: &mut Session, p: &Value) -> Result<Value> {
         let mut outcome: std::result::Result<(), String> = Ok(());
         let Some(q) = project.sequence(seq) else { return };
         'segs: for g in &todo {
+            prog.set_phase(filmcraft_export::ProgressPhase::Processing);
             let mut inter = Vec::with_capacity(g.samples as usize * 2);
             let mut pos = g.first_sample;
             while pos < g.first_sample + g.samples {
@@ -779,6 +780,7 @@ pub fn render_audio(s: &mut Session, p: &Value) -> Result<Value> {
                 pos += n as i64;
                 prog.done.fetch_add(n as u64, Ordering::Relaxed);
             }
+            prog.set_phase(filmcraft_export::ProgressPhase::Finalizing);
             let data = write_wav_f32(&inter, sr as u32);
             let part = dir.join(format!("{}.wav.part", g.hash));
             let fin = dir.join(audio_name(&g.hash));

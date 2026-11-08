@@ -35,6 +35,8 @@ pub(crate) struct AudioOut {
     latency: i64,
     /// Next sample to mix (runs `latency` ahead of `out`).
     next_in: i64,
+    /// First output sample, retained after `out` advances for the exact AAC edit length.
+    start: i64,
     /// Next sample handed out.
     pub out: i64,
     /// End of the range (samples); input past it is silence.
@@ -61,7 +63,7 @@ impl AudioOut {
             l
         });
         let latency = limiter.as_ref().map(|l| l.latency() as i64).unwrap_or(0);
-        Ok(AudioOut { project, seq, sr, channels: r.channels as usize, gain: 1.0, limiter, latency, next_in: start, out: start, end, loudness: None })
+        Ok(AudioOut { project, seq, sr, channels: r.channels as usize, gain: 1.0, limiter, latency, next_in: start, start, out: start, end, loudness: None })
     }
 
     /// The loudness pass: measure the integrated loudness of the whole range and set the gain
@@ -200,6 +202,12 @@ impl AudioOut {
     /// Output samples still to come (per channel).
     pub fn remaining(&self) -> u64 {
         u64::try_from(self.end.saturating_sub(self.out)).unwrap_or(0)
+    }
+
+    /// Total source waveform length in output samples, including after the cursor advances.
+    pub fn sample_count(&self) -> Result<u64> {
+        u64::try_from(i128::from(self.end) - i128::from(self.start))
+            .map_err(|_| ExportError::Unsupported("audio export range exceeds the sample count limit".into()))
     }
 
     /// Everything still to come (to the end of the range).

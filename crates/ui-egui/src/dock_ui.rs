@@ -206,7 +206,7 @@ impl FilmcraftApp {
     /// egui `Modal` shown last frame, the Save changes? prompt of Quit or Close Project, or a
     /// native file dialog. egui's `Modal` blocks input only in the main window, so the dock area
     /// blocks its native windows meanwhile.
-    fn modal_open(&self, ctx: &egui::Context) -> bool {
+    pub(crate) fn modal_open(&self, ctx: &egui::Context) -> bool {
         matches!(self.dialog, Some(crate::Dialog::Preferences | crate::Dialog::Recovery | crate::Dialog::RevertConfirm))
             || self.ui.clip_dialog.as_ref().is_some_and(|dialog| matches!(dialog.command.as_str(), "app.quit" | "file.closeProject"))
             || self.native_dialog_open()

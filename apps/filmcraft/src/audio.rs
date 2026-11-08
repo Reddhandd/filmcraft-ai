@@ -114,7 +114,7 @@ fn output_device(h: &cpal::Host, name: &str, cache: &Mutex<Option<(String, Strin
     }
     let host_name = h.id().name().to_string();
     let mut cache = cache.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut devs: Vec<(String, cpal::Device)> = h.output_devices().ok()?.filter_map(|d| d.name().ok().map(|n| (n, d))).collect();
+    let mut devs: Vec<(String, cpal::Device)> = h.output_devices().ok()?.take(128).filter_map(|d| d.name().ok().map(|n| (n, d))).collect();
     if let Some((cached_host, cached)) = cache.as_ref()
         && *cached_host == host_name
         && let Some(i) = devs.iter().position(|(n, _)| n == cached)
@@ -131,17 +131,24 @@ fn output_device(h: &cpal::Host, name: &str, cache: &Mutex<Option<(String, Strin
 
 impl CpalOut {
     pub fn new() -> Self {
+        let mut output = Self::unopened();
         let host = cpal::default_host();
-        let fallback = Mutex::new(None);
-        let choice = output_device(&host, "", &fallback);
+        let choice = output_device(&host, "", &output.fallback);
         let cfg = choice.as_ref().and_then(|c| c.device.default_output_config().ok());
-        let note = match choice {
+        output.note = match choice {
             Some(c) => c.fallback,
             None => {
                 log::warn!("no audio output device found");
                 Some(Note::NoDevice)
             }
         };
+        output.rate = cfg.as_ref().map_or(48_000, |c| c.sample_rate().0);
+        output.channels = cfg.as_ref().map_or(2, |c| c.channels());
+        output
+    }
+
+    /// Initial state without querying the OS; hardware is discovered by `new` on the worker.
+    fn unopened() -> Self {
         Self {
             stream: None,
             fill: None,
@@ -149,12 +156,12 @@ impl CpalOut {
             health: Arc::new(Health::default()),
             watchdog: Watchdog::default(),
             epoch: Instant::now(),
-            rate: cfg.as_ref().map_or(48_000, |c| c.sample_rate().0),
-            channels: cfg.as_ref().map_or(2, |c| c.channels()),
+            rate: 48_000,
+            channels: 2,
             hw: AudioHardwarePrefs::default(),
             document_rate: None,
-            note,
-            fallback,
+            note: None,
+            fallback: Mutex::new(None),
         }
     }
 
@@ -430,8 +437,8 @@ impl AudioOut for CpalOut {
     }
     fn devices(&self) -> AudioDevices {
         let h = host(&self.hw.device_class);
-        let outputs = h.output_devices().map(|d| d.filter_map(|x| x.name().ok()).collect()).unwrap_or_default();
-        let inputs = h.input_devices().map(|d| d.filter_map(|x| x.name().ok()).collect()).unwrap_or_default();
+        let outputs = h.output_devices().map(|d| d.take(128).filter_map(|x| x.name().ok()).collect()).unwrap_or_default();
+        let inputs = h.input_devices().map(|d| d.take(128).filter_map(|x| x.name().ok()).collect()).unwrap_or_default();
         let output_channels =
             output_device(&h, &self.hw.default_output, &self.fallback).and_then(|c| self.config(&c.device).ok()).map(|cfg| cfg.channels()).unwrap_or(0);
         AudioDevices { hosts: cpal::available_hosts().iter().map(|h| h.name().to_string()).collect(), inputs, outputs, output_channels }
@@ -497,7 +504,7 @@ mod tests {
         stream_error(&health, cpal::StreamError::DeviceNotAvailable);
         assert!(health.lost.load(Ordering::SeqCst));
         assert!(!health.failed.load(Ordering::SeqCst), "a stream error alone must not silence playback");
-        let output = CpalOut::new();
+        let output = CpalOut::unopened();
         assert_eq!(output.played_frames(), None, "no stream, no clock");
     }
 

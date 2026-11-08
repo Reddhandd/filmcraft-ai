@@ -259,11 +259,52 @@ impl Sequence {
     }
     pub fn check(&self) -> Result<(), String> {
         self.check_bounds()?;
+        self.check_identities()?;
         for t in self.all_tracks() {
             t.check()?;
         }
         for t in &self.caption_tracks {
             t.check()?;
+        }
+        Ok(())
+    }
+    /// Track ids, and clip/caption ids, are unique within this sequence. A duplicated sequence
+    /// may retain its internal ids: callers resolve them in the context of that sequence.
+    /// This excludes overlap and duration rules so older editable projects can still load.
+    pub fn check_identities(&self) -> Result<(), String> {
+        let mut tracks = std::collections::BTreeSet::new();
+        let mut clips = std::collections::BTreeSet::new();
+        for (kind, track) in self
+            .video_tracks
+            .iter()
+            .map(|t| ("video", t))
+            .chain(self.audio_tracks.iter().map(|t| ("audio", t)))
+            .chain(self.submix_tracks.iter().map(|t| ("submix", t)))
+        {
+            if !tracks.insert(track.id) {
+                return Err(format!("duplicate track id {} on {kind} track `{}`; track ids must be unique within a sequence", track.id.0, track.name));
+            }
+            for clip in &track.items {
+                if !clips.insert(clip.id) {
+                    return Err(format!(
+                        "duplicate clip id {} on {kind} track `{}`; clip and caption ids must be unique within a sequence",
+                        clip.id.0, track.name
+                    ));
+                }
+            }
+        }
+        for track in &self.caption_tracks {
+            if !tracks.insert(track.id) {
+                return Err(format!("duplicate track id {} on caption track `{}`; track ids must be unique within a sequence", track.id.0, track.name));
+            }
+            for caption in &track.captions {
+                if !clips.insert(caption.id) {
+                    return Err(format!(
+                        "duplicate clip id {} on caption track `{}`; clip and caption ids must be unique within a sequence",
+                        caption.id.0, track.name
+                    ));
+                }
+            }
         }
         Ok(())
     }

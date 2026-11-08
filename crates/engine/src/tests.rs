@@ -1085,6 +1085,122 @@ fn transition_duration_alignment_and_position() {
     assert_eq!(*s.project, before);
 }
 
+#[test]
+fn transition_type_offset_copy_replacement_and_round_trip() {
+    let mut s = demo();
+    let sequence = s.state.active_sequence.unwrap();
+    let rate = s.sequence_rate();
+    let frame = rate.frame_duration();
+    let clips = s.active_sequence().unwrap().video_tracks[0].items.clone();
+    let (id, _, _, cut) = demo_crossing(&s);
+    let before = s.project.clone();
+    let original_preview = s.try_render_program_at(0.25, cut).unwrap().px;
+
+    s.execute(
+        "sequence.setTransition",
+        json!({
+            "transition": id, "effect": "Wipe", "frames": 12, "align": "start", "reverse": true,
+            "params": {"direction": 1}
+        }),
+    )
+    .unwrap();
+    let edited = s.active_sequence().unwrap().video_tracks[0].transitions.iter().find(|tr| tr.id.0 == id).unwrap().clone();
+    assert_eq!(edited.id.0, id);
+    assert_eq!(edited.effect.effect, "wipe");
+    assert_eq!(edited.effect.params["direction"].value, filmcraft_project::ParamValue::Choice(1));
+    assert_eq!((edited.start, edited.duration), (cut, rate.tick_of(12)));
+    assert!(edited.reverse);
+    assert_ne!(s.try_render_program_at(0.25, cut).unwrap().px, original_preview, "changing the transition updates the rendered preview");
+    s.undo().unwrap();
+    assert_eq!(*s.project, *before, "type, duration, alignment and parameters are one edit");
+    s.redo().unwrap();
+    assert_eq!(s.active_sequence().unwrap().video_tracks[0].transitions.iter().find(|tr| tr.id.0 == id), Some(&edited));
+
+    let requested = rate.tick_of(12).0 + frame.0 / 3;
+    let rounded = s.execute("sequence.setTransition", json!({"transition": id, "duration": requested})).unwrap();
+    assert_eq!(rounded["duration"], json!(rate.tick_of(12).0), "tick input rounds to a whole frame");
+
+    let offset = rate.tick_of(4);
+    s.execute("sequence.setTransition", json!({"transition": id, "start": (cut - offset).0})).unwrap();
+    let shifted = s.active_sequence().unwrap().video_tracks[0].transitions.iter().find(|tr| tr.id.0 == id).unwrap().clone();
+    assert_eq!(shifted.start, cut - offset);
+    s.execute("sequence.copyTransition", json!({"transition": id})).unwrap();
+    let destinations = [clips[3].id, clips[4].id];
+    let before_paste = s.project.clone();
+    let pasted = s
+        .execute(
+            "sequence.pasteTransition",
+            json!({"cuts": [
+                {"clip": destinations[0].0, "edge": "in"},
+                {"clip": destinations[1].0, "edge": "in"}
+            ]}),
+        )
+        .unwrap();
+    assert_eq!(pasted["pasted"], 2);
+    let new_ids: Vec<_> = pasted["transitions"].as_array().unwrap().iter().map(|id| filmcraft_project::TransitionId(id.as_u64().unwrap())).collect();
+    assert_eq!(s.state.transition_selection, new_ids, "the editor follows the pasted transitions");
+    for (clip, id) in destinations.into_iter().zip(pasted["transitions"].as_array().unwrap()) {
+        let q = s.active_sequence().unwrap();
+        let tr = q.video_tracks[0].transitions.iter().find(|tr| tr.id.0 == id.as_u64().unwrap()).unwrap();
+        let target_cut = q.find_item(clip).unwrap().1.start;
+        assert_eq!(tr.start, target_cut - offset);
+        assert_eq!(tr.duration, rate.tick_of(12));
+        assert_eq!(tr.effect, shifted.effect);
+        assert_eq!(tr.reverse, shifted.reverse);
+        assert_eq!(tr.align, shifted.align);
+    }
+    let after_paste = s.project.clone();
+    s.undo().unwrap();
+    assert_eq!(*s.project, *before_paste, "bulk replacement and paste are one edit");
+    assert!(s.state.transition_selection.is_empty(), "Undo drops removed transition IDs from the editor");
+    s.redo().unwrap();
+    assert_eq!(*s.project, *after_paste);
+
+    let reopened = filmcraft_format::decode(&filmcraft_format::encode(&s.project, false)).unwrap().project;
+    assert_eq!(reopened.sequence(sequence).unwrap().video_tracks[0].transitions, s.active_sequence().unwrap().video_tracks[0].transitions);
+}
+
+#[test]
+fn transition_edit_rejects_locked_tracks_bad_types_and_missing_handles_atomically() {
+    let mut s = demo();
+    let (id, _, _, _) = demo_crossing(&s);
+    let rate = s.sequence_rate();
+    let original = s.project.clone();
+    let undo = s.history.undo.len();
+    for params in [json!({"effect": "Constant Power"}), json!({"effect": 42}), json!({"effect": "missing type"}), json!({"frames": 0})] {
+        let mut params = params;
+        params["transition"] = json!(id);
+        assert!(s.execute("sequence.setTransition", params).is_err());
+        assert_eq!(*s.project, *original);
+        assert_eq!(s.history.undo.len(), undo);
+    }
+
+    s.execute("timeline.setTrack", json!({"track": "V1", "locked": true})).unwrap();
+    let locked = s.project.clone();
+    assert!(s.execute("sequence.setTransition", json!({"transition": id, "effect": "wipe"})).is_err());
+    assert!(s.execute("sequence.setTransition", json!({"transition": id, "reverse": true})).is_err());
+    assert_eq!(*s.project, *locked);
+    s.execute("timeline.setTrack", json!({"track": "V1", "locked": false})).unwrap();
+
+    let sequence = s.state.active_sequence.unwrap();
+    let incoming = s.active_sequence().unwrap().video_tracks[0].transitions.iter().find(|tr| tr.id.0 == id).unwrap().to.unwrap();
+    let media_id = s.active_sequence().unwrap().find_item(incoming).unwrap().1.item;
+    let p = std::sync::Arc::make_mut(&mut s.project);
+    let media = p.item_mut(media_id).unwrap().as_media_mut().unwrap();
+    media.info.kind = filmcraft_media::MediaKind::Movie;
+    media.info.duration = rate.tick_of(200);
+    p.sequence_mut(sequence).unwrap().find_item_mut(incoming).unwrap().1.source_in = Tick::ZERO;
+    let before = s.project.clone();
+    let undo = s.history.undo.len();
+    let error = s.execute("sequence.setTransition", json!({"transition": id, "frames": 24})).unwrap_err().to_string();
+    assert!(error.contains("source media handles"), "{error}");
+    assert_eq!(*s.project, *before);
+    assert_eq!(s.history.undo.len(), undo);
+
+    std::sync::Arc::make_mut(&mut s.project).sequence_mut(sequence).unwrap().find_item_mut(incoming).unwrap().1.source_in = rate.tick_of(24);
+    s.execute("sequence.setTransition", json!({"transition": id, "frames": 24})).unwrap();
+}
+
 /// #484: Enable flips each selected clip on its own, as in Premiere. With one enabled and one
 /// disabled clip selected it swaps them, instead of first making both the same.
 #[test]

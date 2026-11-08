@@ -45,10 +45,16 @@ pub struct InputFormat {
 pub trait AudioInput: Send {
     /// Select the host for device discovery and the next take, preserving any active capture.
     fn configure_host(&mut self, _host: &str) {}
-    /// Names of the devices that can be chosen as Source.
+    /// Names of the devices that can be chosen as Source. Native backends return cached
+    /// metadata and perform discovery off the caller thread.
     fn devices(&self) -> Vec<String>;
-    /// Input channels of `device` ("" = the default device).
+    /// Input channels of `device` ("" = the default device), or zero while discovering.
+    /// Native backends must not perform blocking driver access here.
     fn channels(&self, device: &str) -> u16;
+    /// Read-only discovery failure, separate from errors in an active recording.
+    fn discovery_error(&self) -> Option<String> {
+        None
+    }
     /// Start capturing from `device` ("" = default), preferably at `sample_rate`.
     fn start(&mut self, device: &str, sample_rate: u32) -> std::result::Result<InputFormat, String>;
     /// Up to `frames` captured frames (planar, every device channel), oldest first. A live device
@@ -289,10 +295,13 @@ fn settings_json(s: &mut Session) -> Value {
     let input = s.voiceover.input();
     let devices = input.devices();
     let channels = input.channels(&source);
+    let discovery_error = input.discovery_error();
     json!({
         "settings": vo,
         "devices": devices,
         "channels": channels,
+        "inputDiscoveryPending": channels == 0 && discovery_error.is_none(),
+        "inputDiscoveryError": discovery_error,
         "recording": s.voiceover.rec,
     })
 }

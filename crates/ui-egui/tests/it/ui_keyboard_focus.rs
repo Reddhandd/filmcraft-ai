@@ -30,8 +30,8 @@ fn tab_traversal_and_space_select_only_the_focused_tool_with_visible_focus() {
         craft_ui::docking::Layout { root: Some(craft_ui::docking::Node::Tabs { panels: vec![PanelKind::Tools], active: 0 }), floating: vec![] };
     h.run_steps(3);
     let first = Id::unique(("tool", "Selection".to_string()));
-    let second = Id::unique(("tool", "TrackSelectForward".to_string()));
-    let third = Id::unique(("tool", "Ripple".to_string()));
+    let second = Id::unique(("tool", "Marquee".to_string()));
+    let third = Id::unique(("tool", "TrackSelectForward".to_string()));
     for _ in 0..128 {
         key(&mut h, Key::Tab, Modifiers::NONE);
         if h.ctx.memory(|m| m.focused()) == Some(first) {
@@ -47,7 +47,7 @@ fn tab_traversal_and_space_select_only_the_focused_tool_with_visible_focus() {
     assert_eq!(h.ctx.memory(|m| m.focused()), Some(second));
     assert_eq!(h.state().ui.tool, Tool::Selection, "traversal does not activate controls");
     key(&mut h, Key::Space, Modifiers::NONE);
-    assert_eq!(h.state().ui.tool, Tool::TrackSelectForward);
+    assert_eq!(h.state().ui.tool, Tool::Marquee);
     assert!(!h.state().playback.playing, "Space belongs to the focused tool");
     assert_eq!(h.state().session.state.playheads, playheads);
     assert!(Arc::ptr_eq(&h.state().session.project, &project));

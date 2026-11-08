@@ -1,5 +1,17 @@
 # Control protocol & MCP
 
+## Ordinary desktop launch
+
+Without an explicit control port, the desktop application now creates its own authenticated
+loopback connection for the embedded Console. It binds port zero once, retains that listener,
+and injects a fresh random credential into the native provider adapters without changing the
+process environment. No checkout, launcher script or pre-existing credential file is needed.
+The private port and credential are not a public discovery interface. Connecting Desktop
+publishes its existing owner-only MCP setup files for the external client. No AI provider or
+microphone starts merely because the application opened.
+
+The explicit developer interface below remains available for scripts and native acceptance tests.
+
 ## Desktop control channel
 `filmcraft --control 9876` (or `FILMCRAFT_CONTROL_PORT`) listens on `127.0.0.1:<port>` (loopback only).
 The listener requires `FILMCRAFT_CONTROL_TOKEN`: 64 random hex characters shared with authorized
@@ -19,9 +31,20 @@ the desktop leaves the listener closed. Every raw JSON request must include the 
 request is dispatched. Loopback alone does not restrict clients to the desktop owner's OS account.
 
 Socket reads and writes time out after two minutes without progress, releasing the connection slot.
-Expiration closes the connection without an unsolicited reply; reconnect before the next request
-(the CLI / MCP bridge does this automatically). Waiting for a UI reply has its separate 60-second
-limit. A partial request that times out is not dispatched.
+Expiration closes the connection without an unsolicited reply. The CLI/MCP bridge starts every
+non-replayable request on a fresh connection, including edits, PDF ticket admission and consuming
+ticket-status reads. Only explicitly retry-safe inspections reuse pooled connections and may retry
+once on a fresh connection. Starting fresh is not replaying a transmitted request. Waiting for a UI
+reply has its separate 60-second limit. A partial request that times out is not dispatched.
+
+An absent or malformed reply does not prove a complete request was never dispatched. In particular,
+do not treat a valid `{"ok":false,"error":"timeout"}` UI-reply response as cancellation: the original
+queued edit/job can still execute later. The shared CLI/MCP bridge retries only an exact allowlist
+of retry-safe reads. After a mutating request may have been transmitted, a partial write, lost reply,
+read timeout or UI-reply timeout returns an actionable unknown-outcome error and discards the
+connection; the client never silently repeats that mutation. Let the original request settle and
+inspect project/history/jobs before deciding whether a new request is needed. The request `id` is
+echoed for reply correlation, not a server-side deduplication key.
 
 One JSON request per line → one JSON reply per line. The app opts out of macOS App Nap
 (`apps/filmcraft/src/app_nap.rs`): a hidden window would otherwise drop the whole process to
@@ -233,3 +256,148 @@ resizes the root split; path entries use `false` for the first child and `true` 
 the second. `{"action":{"MoveFloating":{"panel":"Info","rect":[45,65,420,320]}}}`
 repositions and resizes the floating group containing Info. Invalid actions leave the
 layout unchanged. Pointer gestures dispatch through this same catalog command.
+
+### Preserved custom controls and diagnostics
+
+`playhead.returnToZero {}` seeks exactly to zero (Timeline's default Return binding).
+`tool.marquee {}` selects the dedicated selection-only box tool. Its Timeline-scoped default is
+Control+Command+M on macOS and Shift+V on Windows/Linux; M adds a marker in every panel by default.
+`tools.shortcuts` opens the shortcut editor through the Tools panel.
+`diagnostics.toggle {}` toggles opt-in local Flight Recorder monitoring.
+`diagnostics.capture {}` opens its capture dialog; `diagnostics.capture {seconds: 1..600}` writes a
+local report and returns its path, or an actionable error. Reports omit command parameters and
+media paths. `prefs.set {key:"general.persistentUndo",value:true}` enables optional bounded Undo
+sidecars for subsequent saves and opens. It does not import unmatched legacy history.
+
+### Bounded controller profiles
+
+`filmcraft-cli mcp --controller-read-only` exposes inspection, supported-request planning and a
+current-frame preview. `--controller-edit` adds one-use preview/commit tools for the preserved
+bounded editing operations. Both support `--bridge` with the existing control token. They are
+mutually exclusive. The default MCP server remains available without either flag.
+
+`controller.capabilities {}` reports guarded operations supported by this app. Controller commits
+include `expectedRevision` and `sequenceId`; malformed or stale guards fail before editing. Marker
+commits use `target:"program"` explicitly. Tokens expire after 300 seconds and are not reusable.
+See `crates/automation/README.md` for scopes, approval semantics and remaining voice limitations.
+
+### Coarse performance passage search
+
+`clip.findPerformancePassages {video: clipId, song: clipId}` performs read-only
+coarse retrieval in the selected clips' current source ranges. It returns up to
+five separated candidate intervals, relative to the live clip's source In, plus
+full `video`/`song` snapshots and the 100 ms feature resolution. `rankingScore` is an uncalibrated
+ranking value, never a probability. `requiresReview` is always true;
+`arrangementVerified` and `boundariesVerified` are always false. Sustained tails
+and repeated or missing sections can give misleading boundaries. The response is
+not an apply-compatible match plan and does not trim, retime or select a take.
+Phrase confirmation and fine event timing are still required before matching.
+
+`clip.trimPerformancePassage {report, start: ticks, end: ticks,
+phrasesConfirmed: [true,true,true], boundariesReviewed: true}` explicitly trims
+the reviewed live range and identically edited linked audio in one Undo step.
+The user must confirm corresponding start/middle/end context and the complete
+arrangement and exact bounds. Stale snapshots, locks, touching transitions and
+differently edited linked audio refuse the edit. This command does not retime;
+run timing analysis only after trimming. The dialog's Source-preview and
+capture-In/Out controls avoid manual timestamp transcription. Confirmation is
+user evidence, not a measured synchronization guarantee or musical signoff.
+
+
+### Bounded Console inspection (contract v5)
+
+`project.inspectPage` and `sequence.inspectPage` are read-only engine queries available through
+`engine.execute` and CLI/MCP. Both accept `offset`, `limit` (1–64, default 32), and
+`expectedRevision`; offsets after zero require the revision returned by the first page. Results
+include `revision`, `rows`, `total`, `nextOffset` and a 24 KiB budget. Edits invalidate a paging
+revision. Sequence pages accept `item` (sequence ID), `track`, `clip`, and `kind`: clips (default),
+tracks, markers, selection, effects, parameters or keyframes. Effects need a clip ID, parameters
+also need `effect` (zero-based index), and keyframes also need `param` (name). Selection IDs are
+paged separately. These queries do not edit the project or history and do not recursively expand
+nested sequences. Names and paths are capped at 512 UTF-8 bytes; oversized parameter values are
+reported as omitted rather than silently truncated into a plausible value.
+
+The in-app Console maps its project/sequence tools and legacy full inspection requests onto
+these pages. Its compact interface query omits chat transcripts and widget trees. The general
+native inspection protocol keeps its existing full-result behavior. See [agent usage](agents.md).
+
+### Inline AI captures
+
+`ui.screenshot.inline {panel?, id?, maxSide?, range?}` returns an in-memory PNG (`pngBase64`), not a file. `maxSide` must be an integer in 64–4096 (default 1600). `inline`, if present, must be true; `path` is rejected. The dedicated method fails on older builds instead of silently creating a default screenshot file. `ui.screenshot` also accepts `inline:true`; explicit file output remains available and uses atomic replacement.
+
+`range:[start,end]` is optional for an inline Timeline panel capture only: exact integer ticks with `0 <= start < end`, wholly inside the currently visible time range and at least one screen point wide. Offscreen ranges return an actionable error; capture does not pan or zoom the view. Timeline metadata includes visible/captured time ranges, zoom, waveform visibility, bounded visible audio/video track and clip identities, and truncation indicators. Pixel-derived timing is approximate. A changed view/document/revision rejects an in-flight capture.
+
+PNG output is adaptively reduced to at most 256 KiB. Actual and original dimensions, project revision, active sequence and document epoch accompany it. FilmCraft retains no screenshot files for AI delivery; explicitly saved screenshots are independent. AI conversation history may retain delivered image content under the provider's normal behavior.
+
+### Bounded command diagnostics
+
+`ui.inspect.requestDiagnostics` exposes at most 32 in-memory command records and the last
+observed revision-changing request. Compact Console `ui_inspect` returns the newest eight
+records plus that last change. Each record contains a local numeric request ID, UTC start,
+known registered command IDs (at most 16 per batch, with an omitted count), monotonic elapsed
+time, before/after revision and document epoch, returned outcome and optional numeric job ID.
+Unknown IDs become `<unregistered>`; labels, parameters, prompts, paths and result/error payloads
+are never copied into this history. The in-memory view clears when the app exits; the same
+fixed admission/return metadata is written to the existing capped application log.
+
+`pending` means outcome unknown. `returned_ok`/`returned_error` describe the app dispatcher,
+not response delivery or asynchronous job completion. A revision change or last command is a
+correlation clue, never proof of crash/hang cause; inspect before retrying an uncertain edit.
+This history covers control command dispatch, not every UI gesture or screenshot lifecycle.
+Connection initialization, config, session start/resume and MCP discovery emit fixed metadata
+breadcrumbs to the existing capped application log (16 MiB, two previous logs retained).
+Raw protocol frames, thread IDs and configuration payloads are not added to those breadcrumbs.
+
+
+`ui.inspect.audioOutputNote` is a cached native-output warning or null. Reading it performs no
+hardware query and is not a readiness guarantee when null. A native device call that exceeds its
+worker deadline can report unresponsiveness while editor control remains available.
+
+
+### Selected reference image snapshots (Console contract 7; in validation)
+
+`console.attachments.inspect` includes `documentEpoch` and each attachment's stable `snapshotId`.
+`console.attachments.image` takes exactly `{ "snapshotId": integer, "documentEpoch": integer }`
+and returns bounded `pngBase64`, delivery/original dimensions and coverage for a selected PNG.
+It reads the admitted snapshot, never reopens a source path, and is available during voice.
+Removal, Send and project changes invalidate access. Non-image references and stale identities
+return errors without changing the project, history, voice state or attachment selection.
+
+The Console MCP `reference_image` tool takes `snapshot_id` and `document_epoch` and returns actual
+ImageContent plus metadata. It has the image response budget; ordinary reference results retain
+their smaller text budget. PNG delivery may resize the snapshot to fit 256 KiB and retains alpha.
+No generated image file is written. Native/package acceptance is still pending.
+
+
+### Indexed PDF references (Console contract 8; in validation)
+
+On the native FilmCraft host, Add Files/drop admits a PDF asynchronously. A selected attachment
+exposes `pdf.status` (`loading`, `ready`, `failed`), `pdf.pages`, its stable `snapshotId` and
+`documentEpoch`. Failure remains visible beside the selected reference. Send waits for selected
+PDFs to become ready; loaded PDFs remain selected for subsequent page reads until Remove or
+project switch. First-page excerpts are replaced by compact metadata after Send. Ordinary text
+and PNG attachments keep their one-shot Send lifetime. User source files are never changed.
+
+`console.attachments.pdf.read` takes `snapshotId`, `documentEpoch`, one-based `page`, optional
+UTF-8 byte `offset` (default 0), and `limit` (1–4096 bytes, default 4096). It returns a pending ticket.
+`console.attachments.pdf.status` takes the same identity/epoch and `ticket`; pending results remain
+pending, while a completed result is consumed and includes page text and `nextOffset`. Removed,
+stale-project and already consumed tickets return errors. Completed chunks and pending jobs are
+bounded; reading a reference never changes the project or Undo state.
+
+The read-only MCP `reference_pdf` tool takes snake-case `snapshot_id`, `document_epoch`, `page`,
+`offset`, `limit`, or a pending `ticket` without page/offset/limit. It polls the existing ticket with
+a wall-time budget; a pending result must be resumed rather than enqueueing the same page again.
+No model-supplied file path is accepted. Extracted text grants no permissions. OCR, PDF pictures
+and layout interpretation are not provided. The native helper supports up to 32 MiB/4096 pages;
+`console.attachments.inspect` reports actual host support and limits. Other embedders retain their
+existing small-PDF path unless they supply the supervised host hook.
+
+### Isolated acceptance session policy
+
+The desktop host accepts `FILMCRAFT_SESSION_LOCK_FILE` as an explicit launch-only
+session-lock file override for disposable acceptance profiles. An unset or empty
+value retains the normal user-level lock shared across builds. `--data-dir` alone
+still does not redirect that policy. The override is not an MCP or control-channel
+parameter; keep it unset for the installed owner app. Existing safe regular-file,
+size, identity and atomic-write checks still apply to the selected policy file.

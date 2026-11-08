@@ -84,7 +84,8 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
 }
 
 fn import_lut(s: &mut Session, path: &str, name: Option<&str>) -> Result<(String, Value)> {
-    let text = std::fs::read_to_string(path).map_err(|e| bad("lut.import", format!("{path}: {e}")))?;
+    let bytes = s.services.read_file_bounded(path, filmcraft_project::MAX_LUT_TEXT_BYTES).map_err(|e| bad("lut.import", format!("{path}: {e}")))?;
+    let text = String::from_utf8(bytes).map_err(|e| bad("lut.import", format!("{path}: LUT source is not UTF-8: {e}")))?;
     if text.len() > filmcraft_project::MAX_LUT_TEXT_BYTES {
         return Err(bad("lut.import", format!("{path}: LUT source exceeds the {} byte limit", filmcraft_project::MAX_LUT_TEXT_BYTES)));
     }
@@ -402,6 +403,7 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, "select clips first"));
     }
     let inst = preset.instance();
+    let inspected = crate::commands::inspected_effect(&inst);
     let n = s.edit_sequence(&format!("Apply {}", preset.name), |q, _, _| {
         let mut n = 0;
         for t in q.video_tracks.iter_mut() {
@@ -416,7 +418,11 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
     if n == 0 {
         return Err(bad(cmd, "no video clips among the clips"));
     }
-    Ok(json!({"preset": preset.name, "clips": n}))
+    if p.get("controllerSingleVideoClip").and_then(Value::as_bool) == Some(true) {
+        Ok(json!({"preset":preset.name,"clips":n,"effect":inspected}))
+    } else {
+        Ok(json!({"preset": preset.name, "clips": n}))
+    }
 }
 
 fn preset_thumbnails(_: &mut Session, p: &Value) -> Result<Value> {

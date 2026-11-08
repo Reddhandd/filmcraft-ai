@@ -49,12 +49,28 @@ fn snap_to(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, t: Tick, exc
     }
 }
 
+/// The selected bar paints above its neighbours. Keep hover, control-channel hit reporting and
+/// the press target aligned with that drawing order; a deliberate click may then cycle bars.
+pub(super) fn selected_transition_grab(seq: &Sequence, layout: &Layout, pos: Pos2, selected: Option<TransitionId>, grab: Grab) -> Grab {
+    if matches!(grab, Grab::Other(Hit::Transition { .. })) {
+        transition_target(seq, layout, pos, selected, false).map(Grab::Other).unwrap_or(grab)
+    } else {
+        grab
+    }
+}
+
 /// What the Timeline shows at `pos` for the control channel's `ui.timeline.hit`, with `kind`: the
 /// trim a press of the current tool with `mods` starts there (null when it would not trim).
 pub fn hit_json(app: &FilmcraftApp, pos: Pos2, mods: egui::Modifiers) -> Value {
     let (Some(layout), Some(seq)) = (app.tl.layout.as_ref(), app.session.active_sequence()) else { return json!({"hit": "none"}) };
     let t = layout.tick_at(pos.x);
-    let grab = grab_at(seq, layout, pos, app.ui.tool, mods, app.session.prefs.trim.selection_tool_roll_ripple);
+    let grab = selected_transition_grab(
+        seq,
+        layout,
+        pos,
+        app.session.state.transition_selection.first().copied(),
+        grab_at(seq, layout, pos, app.ui.tool, mods, app.session.prefs.trim.selection_tool_roll_ripple),
+    );
     let kind = match grab {
         Grab::Edge { kind, .. } => json!(kind.name()),
         Grab::Volume { .. } => json!("volume"),

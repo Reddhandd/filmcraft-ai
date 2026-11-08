@@ -1,6 +1,13 @@
 # Parity with Adobe Premiere Pro
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (full re-measure against Premiere Pro 2026 26.5.2; replaces the scorecard and estimate that lived in ROADMAP.md) · **Target:** Adobe Premiere Pro 2026 (26.5.2, macOS)
+2026-10-29 reconciliation: the percentages and effort estimates in this assessment remain the
+historical 2026-10-10 estimates. Current source includes AVI import, three-platform PR CI,
+menu/effect/transition parity tooling and a native AI console with recorded workflow acceptance.
+The combined local main adds worker, input and transaction safeguards under validation. These
+changes have not been converted into new parity percentages; broad fidelity/corpus tests,
+live platform results and the remaining beta gates still determine release readiness.
+
+> **Last reviewed:** 2026-10-29 (implementation audit; parity estimates 2026-10-10) · **Last updated:** 2026-10-29 · **Change:** major (local consolidation, safety boundaries and current qualification evidence) · **Target:** Adobe Premiere Pro 2026 (26.5.2, macOS)
 
 The authoritative assessment of how close FilmCraft is to Premiere Pro, and how much work is left.
 [ROADMAP.md](../ROADMAP.md) summarizes it; [gaps.md](gaps.md) lists every shortfall one at a time.
@@ -130,7 +137,7 @@ agent-hours to close the area to Premiere, sequential.
 | Hardware acceleration (decode, encode, GPU effects, I/O devices) | ~45% | 120–200 | [hardware-parity.md](hardware-parity.md) |
 | Localization (12 key languages) | ~35% of Premiere's set; 4 of 12 key languages near-complete | 150–230 | [localization-parity.md](localization-parity.md) |
 | Performance (beyond hardware) | ~55% | 60–120 | [performance.md](performance.md) |
-| Stability | ~45% | 60–120 | [gaps.md](gaps.md#g4-crashes-at-start-up-and-no-test-ci-on-pull-requests) |
+| Stability | ~45% | 60–120 | [gaps.md](gaps.md#g4-launch-crashes-and-cross-platform-pr-ci) |
 | Platforms | ~60% | 50–90 | [gaps.md](gaps.md#g9-windows-and-linux-at-run-time) |
 | Plugins and ecosystem | ~5% | 200–400 | [gaps.md](gaps.md#g11-no-plugin-hosting) |
 | AI features | ~25% | 150–300 | [gaps.md](gaps.md#g12-ai-features) |
@@ -236,7 +243,7 @@ Craft apps: the parts the mainstream number leaves out (plugins, AI, localizatio
 ~12% in the full number, while the three discounts hit exactly what a working editor meets every
 week. Raising it means fixing [G2](gaps.md#g2-premieres-prproj-cannot-be-opened),
 [G3](gaps.md#g3-10-bit-and-422-camera-media-needs-hardware),
-[G4](gaps.md#g4-crashes-at-start-up-and-no-test-ci-on-pull-requests) and
+[G4](gaps.md#g4-launch-crashes-and-cross-platform-pr-ci) and
 [G8](gaps.md#g8-ui-fidelity-monitor-handles-effect-controls-docking).
 
 ### Essentials user

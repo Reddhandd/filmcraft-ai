@@ -41,3 +41,26 @@ fn both_noise_variants_change_on_every_sequence_frame() {
         assert_eq!(render_noise(effect_id, FrameRate::FPS_60, 0, 0.0), [0.5, 0.5, 0.5, 1.0].repeat(16 * 16));
     }
 }
+
+#[test]
+fn colored_noise_negative_timestamp_does_not_overflow_seed() {
+    let mut effect = find_effect("noise").unwrap().instance();
+    effect.param_mut("amount").unwrap().value = ParamValue::Float(50.0);
+    effect.param_mut("color").unwrap().value = ParamValue::Bool(true);
+    let context = FxCtx {
+        t: filmcraft_time::Tick(-1),
+        px_scale: 1.0,
+        seconds: 0.0,
+        timecode: "",
+        clip_name: "",
+        project: None,
+        env: None,
+        frame_rate: 30.0,
+        working: filmcraft_color::WorkingSpace::Rec709,
+    };
+    let mut image = Image::filled(2, 2, [0.5, 0.5, 0.5, 1.0]);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| apply(&mut image, &effect, &context)));
+    assert!(result.is_ok(), "negative timestamp must not overflow colored seed offsets");
+    assert!(image.px.iter().all(|v| v.is_finite()));
+    assert_ne!(image.px[0], image.px[1]);
+}

@@ -39,6 +39,7 @@ use filmcraft_render::Blend;
 use filmcraft_render::plan::{FramePlan, PlanLayer, PlanStep};
 
 pub mod adapter;
+mod composite_stage;
 pub mod export_renderer;
 pub mod fx;
 pub mod lut;
@@ -52,6 +53,8 @@ pub use mask::GpuMask;
 /// shader applies the sRGB encoding.
 pub const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const ACCUM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+const MAX_UPLOAD_CACHE_BYTES: usize = 256 * 1024 * 1024;
+const MAX_UPLOAD_CACHE_ENTRIES: usize = 24;
 
 struct Uploaded {
     /// Y, Cb, Cr (or the RGBA texture) and the alpha plane (the dummy texture when there is none).
@@ -62,6 +65,8 @@ struct Uploaded {
     alpha_scale: f32,
     chroma: (u32, u32),
     last_used: u64,
+    /// Retained CPU pixel bytes plus actual uploaded texture payload bytes.
+    retained_bytes: usize,
     /// The uploaded pixel buffers, kept alive while cached: the cache key is the buffer address,
     /// and a freed buffer's address can be reused by a different frame (stale texture).
     _pixels: PixelData,
@@ -73,6 +78,7 @@ pub struct GpuCompositor {
     layer_pipeline: wgpu::RenderPipeline,
     /// Blend modes that read the destination: `fs_blend`, no fixed-function blending.
     blend_pipeline: wgpu::RenderPipeline,
+    adjustment_pipeline: wgpu::RenderPipeline,
     final_pipeline: wgpu::RenderPipeline,
     layer_bgl: wgpu::BindGroupLayout,
     blend_bgl: wgpu::BindGroupLayout,
@@ -92,6 +98,8 @@ pub struct GpuCompositor {
     transition_inputs: [Option<(wgpu::Texture, wgpu::TextureView, (u32, u32))>; 2],
     pub gpu_transitions: u64,
     pub cpu_transitions: u64,
+    /// Successfully submitted lower-track adjustment replacements (not CPU fallbacks).
+    pub gpu_adjustments: u64,
     /// Total bytes uploaded (stats).
     pub uploaded_bytes: u64,
 }
@@ -263,6 +271,7 @@ pub fn prepare(plan: &FramePlan) -> PreparedPlan {
                 .iter()
                 .flat_map(|s| match s {
                     PlanStep::Layers(layers) => vec![prepare_layers(layers)],
+                    PlanStep::Adjustment { .. } => Vec::new(),
                     PlanStep::Transition { inputs, .. } => inputs.iter().map(|ls| prepare_layers(ls)).collect(),
                 })
                 .collect(),
@@ -359,6 +368,7 @@ impl GpuCompositor {
             multiview_mask: None,
             cache: None,
         });
+        let adjustment_pipeline = composite_stage::adjustment_pipeline(device, &shader, &bpl);
         let fpl =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("final"), bind_group_layouts: &[Some(&final_bgl)], immediate_size: 0 });
         let final_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -410,6 +420,7 @@ impl GpuCompositor {
             queue: queue.clone(),
             layer_pipeline,
             blend_pipeline,
+            adjustment_pipeline,
             final_pipeline,
             layer_bgl,
             blend_bgl,
@@ -426,6 +437,7 @@ impl GpuCompositor {
             transition_inputs: [None, None],
             gpu_transitions: 0,
             cpu_transitions: 0,
+            gpu_adjustments: 0,
             uploaded_bytes: 0,
         }
     }
@@ -494,7 +506,8 @@ impl GpuCompositor {
         let (w, h) = (f.width, f.height);
         let d0 = self.dummy.clone();
         let dummy = || d0.clone();
-        let up = match &f.data {
+        let before_upload = self.uploaded_bytes;
+        let mut up = match &f.data {
             PixelData::Rgba8(d) => {
                 let v = self.plane_texture(w, h, wgpu::TextureFormat::Rgba8UnormSrgb, d, 4);
                 Uploaded {
@@ -504,6 +517,7 @@ impl GpuCompositor {
                     alpha_scale: 0.0,
                     chroma: (w, h),
                     last_used: self.clock,
+                    retained_bytes: 0,
                     _pixels: f.data.clone(),
                 }
             }
@@ -524,6 +538,7 @@ impl GpuCompositor {
                     alpha_scale: 0.0,
                     chroma: (w, h),
                     last_used: self.clock,
+                    retained_bytes: 0,
                     _pixels: f.data.clone(),
                 }
             }
@@ -542,6 +557,7 @@ impl GpuCompositor {
                     alpha_scale,
                     chroma: (cw, ch),
                     last_used: self.clock,
+                    retained_bytes: 0,
                     _pixels: f.data.clone(),
                 }
             }
@@ -571,20 +587,33 @@ impl GpuCompositor {
                     alpha_scale,
                     chroma: (cw, ch),
                     last_used: self.clock,
+                    retained_bytes: 0,
                     _pixels: f.data.clone(),
                 }
             }
         };
+        up.retained_bytes = f.byte_size().saturating_add(usize::try_from(self.uploaded_bytes.saturating_sub(before_upload)).unwrap_or(usize::MAX));
         self.uploads.insert(key, up);
-        // keep the most recent uploads (enough for several stacked layers + playback lookahead)
-        if self.uploads.len() > 24 {
-            let mut v: Vec<(u64, (usize, u32, u32))> = self.uploads.iter().map(|(k, u)| (u.last_used, *k)).collect();
-            v.sort_unstable();
-            for (_, k) in v.into_iter().take(self.uploads.len() - 24) {
-                self.uploads.remove(&k);
+        // Evict only after the entire batch has acquired its bind groups; evicting here can
+        // erase an earlier source in the same frame when more than 24 layers are visible.
+        key
+    }
+
+    fn trim_uploads(&mut self, byte_budget: usize) {
+        let mut bytes = self.uploads.values().fold(0usize, |sum, upload| sum.saturating_add(upload.retained_bytes));
+        if bytes <= byte_budget && self.uploads.len() <= MAX_UPLOAD_CACHE_ENTRIES {
+            return;
+        }
+        let mut oldest: Vec<_> = self.uploads.iter().map(|(key, upload)| (upload.last_used, *key)).collect();
+        oldest.sort_unstable();
+        for (_, key) in oldest {
+            if bytes <= byte_budget && self.uploads.len() <= MAX_UPLOAD_CACHE_ENTRIES {
+                break;
+            }
+            if let Some(upload) = self.uploads.remove(&key) {
+                bytes = bytes.saturating_sub(upload.retained_bytes);
             }
         }
-        key
     }
 
     /// The source description of an uploaded frame.
@@ -707,7 +736,14 @@ impl GpuCompositor {
     /// [`composite`](Self::composite) with texel conversions already done by [`prepare`] (the
     /// result is identical; only the upload work on this thread differs).
     pub fn composite_prepared(&mut self, plan: &FramePlan, prep: Option<&PreparedPlan>) -> (wgpu::TextureView, (u32, u32)) {
-        self.render_plan(plan, prep, true, true)
+        if let Some(stage) = self.fx.as_mut() {
+            stage.begin_frame();
+        }
+        let output = self.render_plan(plan, prep, true, true);
+        if let Some(stage) = self.fx.as_mut() {
+            stage.end_frame();
+        }
+        output
     }
 
     fn render_plan(&mut self, plan: &FramePlan, prep: Option<&PreparedPlan>, clear: bool, resolve: bool) -> (wgpu::TextureView, (u32, u32)) {
@@ -770,9 +806,6 @@ impl GpuCompositor {
         let mut bind_groups = Vec::with_capacity(layers.len());
         // the effect stage of each layer with effects (recorded right before its draw)
         let mut jobs: Vec<Option<fx::FxJob>> = Vec::with_capacity(layers.len());
-        if let Some(f) = self.fx.as_mut() {
-            f.begin_frame();
-        }
         for (l, k) in layers.iter().zip(&keys) {
             // (every frame was just uploaded; a missing upload draws transparent texels)
             let src = self.src_info(&l.frame, *k).unwrap_or(SrcInfo {
@@ -855,9 +888,9 @@ impl GpuCompositor {
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("layer"), layout, entries: &entries });
             bind_groups.push((bg, region));
         }
-        if let Some(f) = self.fx.as_mut() {
-            f.end_frame();
-        }
+        // Bind groups/jobs now own the texture handles needed for every current layer. Cache
+        // eviction cannot substitute transparent pixels or release an in-flight GPU resource.
+        self.trim_uploads(MAX_UPLOAD_CACHE_BYTES);
         let final_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("final"),
             layout: &self.final_bgl,
@@ -932,8 +965,23 @@ impl GpuCompositor {
     }
 
     fn composite_steps(&mut self, width: usize, height: usize, steps: &[PlanStep], prep: Option<&PreparedPlan>) -> (wgpu::TextureView, (u32, u32)) {
-        if steps.iter().any(|s| matches!(s, PlanStep::Transition { effect, .. } if effect.effect != "push")) {
-            self.cpu_transitions += 1;
+        if steps.iter().any(|s| match s {
+            PlanStep::Transition { effect, .. } => effect.effect != "push",
+            PlanStep::Adjustment { fx, opacity } => {
+                self.fx.is_none()
+                    || !composite_stage::adjustment_fits(fx.size)
+                    || fx.ops.len() > 256
+                    || !fx.ops.iter().all(filmcraft_render::gpufx::FxOp::gpu_ok)
+                    || !opacity.is_finite()
+                    || fx.size.0 as usize != width
+                    || fx.size.1 as usize != height
+                    || fx.size.0.max(fx.size.1) > self.device.limits().max_texture_dimension_2d
+            }
+            PlanStep::Layers(_) => false,
+        }) {
+            if steps.iter().any(|s| matches!(s, PlanStep::Transition { .. })) {
+                self.cpu_transitions = self.cpu_transitions.saturating_add(1);
+            }
             let plan = FramePlan::Composite { width, height, steps: steps.to_vec() };
             return self.composite_prepared(&FramePlan::Image(filmcraft_render::plan::execute_cpu(&plan)), None);
         }
@@ -945,6 +993,12 @@ impl GpuCompositor {
                 PlanStep::Layers(layers) => {
                     let p = children.as_mut().and_then(Iterator::next);
                     self.render_plan(&FramePlan::Layers { width, height, layers: layers.clone() }, p, false, false);
+                }
+                PlanStep::Adjustment { fx, opacity } => {
+                    if !self.adjust_composite(&canvas, dims, fx, *opacity) {
+                        let plan = FramePlan::Composite { width, height, steps: steps.to_vec() };
+                        return self.composite_prepared(&FramePlan::Image(filmcraft_render::plan::execute_cpu(&plan)), None);
+                    }
                 }
                 PlanStep::Transition { inputs, effect, progress, .. } => {
                     let mut views = [self.dummy.clone(), self.dummy.clone()];
@@ -972,7 +1026,13 @@ impl GpuCompositor {
             return None;
         }
         let t = std::time::Instant::now();
+        if let Some(stage) = self.fx.as_mut() {
+            stage.begin_frame();
+        }
         self.render_plan(plan, prep, true, false);
+        if let Some(stage) = self.fx.as_mut() {
+            stage.end_frame();
+        }
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("filmcraft-composite-export") });
         let size = self.copy_accumulator(&mut enc)?;
         self.queue.submit([enc.finish()]);
@@ -987,6 +1047,7 @@ impl GpuCompositor {
         let key = self.upload(frame, None);
         let src = self.src_info(frame, key)?;
         let views = self.uploads.get(&key)?.views.clone();
+        self.trim_uploads(MAX_UPLOAD_CACHE_BYTES);
         let n = fx.decimation.max(1) as f64;
         let (w, h) = (fx.size.0.max(1), fx.size.1.max(1));
         let mut su = Self::uniforms(&src, &filmcraft_geom::Affine::scale(1.0 / n, 1.0 / n), 1.0, Blend::Normal, (w, h));

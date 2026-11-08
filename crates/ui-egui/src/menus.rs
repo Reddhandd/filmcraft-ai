@@ -16,12 +16,91 @@ pub struct UiCommand {
 }
 
 macro_rules! uic {
-    ($id:literal, $label:literal, [$($m:literal),*], $sc:expr) => {
+    ($id:literal, $label:expr, [$($m:literal),*], $sc:expr) => {
         UiCommand { id: $id, label: $label, menu: &[$($m),*], shortcut: $sc }
     };
 }
 
 pub const UI_COMMANDS: &[UiCommand] = &[
+    uic!("window.assistantLibrary", "Assistant Library", ["Window"], None),
+    uic!("window.commandConsole", "Command Console", ["Window"], None),
+    uic!("console.run", "Run Console Command", [], None),
+    uic!("console.assistant.inspect", "Inspect Project Assistants", [], None),
+    uic!("console.assistant.memoryHistory", "Inspect Memory Originals", [], None),
+    uic!("console.assistant.memoryRestore", "Restore Working Memory", [], None),
+    uic!("console.assistant.review", "Review Assistant Teaching", [], None),
+    uic!("console.assistant.history", "Inspect Assistant Versions", [], None),
+    uic!("console.assistant.restore", "Restore Assistant Version", [], None),
+    uic!("console.assistant.autosave", "Set Assistant Autosave", [], None),
+    uic!("console.assistant.save", "Save Assistant", [], None),
+    uic!("console.assistant.load", "Load Project Assistant", [], None),
+    uic!("console.assistant.detach", "Use Current Project Memory", [], None),
+    uic!("console.bridge.commands", "Discover Console Commands", [], None),
+    uic!("console.bridge.execute", "Execute Console Command", [], None),
+    uic!("console.bridge.prepare", "Validate Console Command", [], None),
+    uic!("console.bridge.memory", "Project Memory", [], None),
+    uic!("console.bridge.batch", "Execute Console Edit Group", [], None),
+    uic!("console.bridge.analyze", "Analyze Console Media", [], None),
+    uic!("console.bridge.analysis.read", "Read Console Analysis", [], None),
+    uic!("console.bridge.capabilities", "Inspect Console Capabilities", [], None),
+    uic!("console.bridge.interface", "Inspect Compact Console Interface", [], None),
+    uic!("console.bridge.propose", "Request Console Edit Review", [], None),
+    uic!("console.bridge.status", "Inspect Console Request", [], None),
+    uic!("console.bridge.cancel", "Cancel Console Request", [], None),
+    uic!("console.session.lock", "Lock Session", [], None),
+    uic!("console.session.unlock", "Unlock Session", [], None),
+    uic!("console.session.new", "New Conversation", [], None),
+    uic!("console.session.resume", "Resume Saved Conversation", [], None),
+    uic!("console.sessions.open", "Resume Codex Session", [], None),
+    uic!("console.sessions.reload", "Reload from Disk", [], None),
+    uic!("console.memory.open", "View/Edit Memory", [], None),
+    uic!("console.context.inspect", "Inspect Effective Creative Context", [], None),
+    uic!("console.library.ocrInstall", "Install Verified Local OCR Models", [], None),
+    uic!("console.library.recover", "Restore Previous Reference Index", [], None),
+    uic!("console.library.inspect", "Inspect Reference Library", [], None),
+    uic!("console.library.selection", "Select Project Reference Books", [], None),
+    uic!("console.library.search", "Search Reference Library", [], None),
+    uic!("console.library.illustration", "Inspect Requested EPUB Illustration", [], None),
+    uic!("console.library.page", "Inspect Requested Book Page", [], None),
+    uic!("console.library.cancel", "Cancel Book Import", [], None),
+    uic!("console.library.status", "Reference Library Request Status", [], None),
+    uic!("console.library.import", "Import Reference Book", [], None),
+    uic!("console.library.remove", "Remove Reference Book", [], None),
+    uic!("console.library.enable", "Enable Reference Book", [], None),
+    uic!("console.attachments.inspect", "Console attachments.inspect", [], None),
+    uic!("console.attachments.pdf.read", "Console read selected PDF", [], None),
+    uic!("console.attachments.pdf.status", "Console PDF text status", [], None),
+    uic!("console.attachments.image", "Console reference image", [], None),
+    uic!("console.attachments.add", "Console attachments.add", [], None),
+    uic!("console.attachments.project", "Attach Project Reference", [], None),
+    uic!("console.attachments.remove", "Console attachments.remove", [], None),
+    uic!("console.styles.inspect", "Console styles.inspect", [], None),
+    uic!("console.styles.draft", "Console styles.draft", [], None),
+    uic!("console.styles.save", "Console styles.save", [], None),
+    uic!("console.styles.delete", "Delete Style Preset", [], None),
+    uic!("console.styles.rename", "Rename Style Preset", [], None),
+    uic!("console.styles.load", "Console styles.load", [], None),
+    uic!("console.styles.disable", "Console styles.disable", [], None),
+    uic!("console.styles.import", "Console styles.import", [], None),
+    uic!("console.styles.export", "Console styles.export", [], None),
+    uic!("console.memory.save", "Save Memory", [], None),
+    uic!("console.settings.toggle", "Connection and Voice Settings", [], None),
+    uic!("console.provider.inspect", "Inspect AI Connection", [], None),
+    uic!("console.api.clear", "Clear API Key", [], None),
+    uic!("console.provider.select", "Select AI Connection", [], None),
+    uic!("console.model.set", "Select Console Model", [], None),
+    uic!("console.chat.send", "Send Console Message", [], None),
+    uic!("console.chat.cancel", "Cancel Console Turn", [], None),
+    uic!("console.chat.approve", "Apply Proposed Edit", [], None),
+    uic!("console.chat.reject", "Reject Proposed Edit", [], None),
+    uic!("console.voice.inputMode.set", "Set Voice Microphone Mode", [], None),
+    uic!("console.voice.choice.set", "Select Console Speaking Voice", [], None),
+    uic!("console.voice.channel.set", "Select Console Microphone Channel", [], None),
+    uic!("console.voice.on", "Turn Console Voice On", [], None),
+    uic!("console.voice.off", "Turn Console Voice Off", [], None),
+    uic!("console.voice.mute", "Mute Console Microphone", [], None),
+    uic!("console.chat.copy", "Copy Console Message", [], None),
+    uic!("console.chat.paste", "Paste into Console Message", [], None),
     uic!("window.dockAction", "Docking Action", [], None),
     uic!("window.dockPanel", "Dock Panel", [], None),
     uic!("window.floatPanel", "Undock Panel", [], None),
@@ -121,7 +200,10 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("window.workspace.saveChanges", "Save Changes to this Workspace", ["Window", "Workspaces"], None),
     uic!("window.workspace.saveAs", "Save as New Workspace…", ["Window", "Workspaces"], None),
     uic!("window.workspace.edit", "Edit Workspaces…", ["Window", "Workspaces"], None),
+    uic!("diagnostics.toggle", "Toggle Flight Recorder", ["Help"], None),
+    uic!("diagnostics.capture", "Capture Diagnostic Report", ["Help"], None),
     uic!("tool.selection", "Selection Tool", [], Some("V")),
+    uic!("tool.marquee", "Marquee Selection Tool", [], None),
     uic!("tool.trackSelectForward", "Track Select Forward Tool", [], Some("A")),
     uic!("tool.trackSelectBackward", "Track Select Backward Tool", [], Some("Shift+A")),
     uic!("tool.ripple", "Ripple Edit Tool", [], Some("B")),
@@ -139,11 +221,11 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("mode.import", "Import", [], None),
     uic!("mode.edit", "Edit", [], None),
     uic!("mode.export", "Export", ["File", "Export"], Some("Cmd+M")),
-    uic!("help.discord", "Join the ArtCraft Discord…", ["Help"], None),
-    uic!("help.website", "ArtCraft Website", ["Help"], None),
-    uic!("help.appPage", "FilmCraft on getartcraft.com", ["Help"], None),
-    uic!("help.github", "FilmCraft on GitHub", ["Help"], None),
-    uic!("help.reportIssue", "Report an Issue…", ["Help"], None),
+    uic!("help.discord", crate::links::ALL[0].1, ["Help"], None),
+    uic!("help.website", crate::links::ALL[1].1, ["Help"], None),
+    uic!("help.appPage", crate::links::ALL[2].1, ["Help"], None),
+    uic!("help.github", crate::links::ALL[3].1, ["Help"], None),
+    uic!("help.reportIssue", crate::links::ALL[4].1, ["Help"], None),
     uic!("help.revealLogFiles", "Reveal Log Files…", ["Help"], None),
     uic!("help.systemCompatibilityReport", "System Compatibility Report…", ["Help"], None),
     uic!("app.checkForUpdates", "Check for Updates…", ["Help"], None),
@@ -182,6 +264,60 @@ pub fn targets_source(app: &FilmcraftApp, params: &Value) -> bool {
 
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params: Value) -> Result<Value, String> {
+    if matches!(
+        id,
+        "file.newProject"
+            | "file.open"
+            | "file.close"
+            | "file.closeProject"
+            | "file.closeAllProjects"
+            | "file.closeAllOtherProjects"
+            | "file.recover"
+            | "file.revert"
+            | "file.openDemoProject"
+    ) && crate::console::sessions::has_unsaved_memory(app)
+    {
+        return Err(crate::console::sessions::protect_memory(app));
+    }
+
+    if id.starts_with("file.openRecent.")
+        || matches!(
+            id,
+            "file.newProject"
+                | "file.open"
+                | "file.close"
+                | "file.closeProject"
+                | "file.closeAllProjects"
+                | "file.closeAllOtherProjects"
+                | "file.recover"
+                | "file.revert"
+                | "file.openDemoProject"
+        )
+    {
+        crate::console::assistants::flush(app)?;
+    }
+
+    if id.starts_with("console.") && id != "console.run" {
+        return crate::console::invoke_session(app, ctx, id, params);
+    }
+    if id == "window.assistantLibrary" {
+        if params.as_object().is_none_or(|params| !params.is_empty()) {
+            return Err("window.assistantLibrary expects an empty parameter object".into());
+        }
+        return crate::console::reference_library::open(app, ctx);
+    }
+    if id == "window.commandConsole" {
+        app.ui.console.open = true;
+        return Ok(Value::Null);
+    }
+    if id == "console.run" {
+        let object = params.as_object().ok_or("console.run expects {line: string}")?;
+        if object.len() != 1 {
+            return Err("console.run expects only line".into());
+        }
+        let line = object.get("line").and_then(Value::as_str).ok_or("console.run expects line as a string")?;
+        return crate::console::execute(app, ctx, line);
+    }
     if id == "edit.selectAll" && (crate::panels::graphics::select_all_edited_text(app) || crate::panels::effect_controls::select_all_keyframes(app)) {
         return Ok(Value::Null);
     }
@@ -264,6 +400,34 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
     }
     if let Some(r) = crate::panels::workspaces::route(app, id, &params) {
         return r;
+    }
+    if id == "diagnostics.toggle" {
+        if app.flight_recorder.enabled {
+            app.flight_recorder.stop().map_err(|e| e.to_string())?;
+        } else {
+            let folder = app
+                .session
+                .prefs_path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("Diagnostics"))
+                .unwrap_or_else(|| std::env::temp_dir().join("FilmCraft Diagnostics"));
+            app.flight_recorder.start(app.session.revision, app.session.journal.len(), folder).map_err(|e| e.to_string())?;
+        }
+        app.ui.status =
+            if app.flight_recorder.notice.is_empty() { "Flight Recorder on (rolling 10 minutes)".into() } else { app.flight_recorder.notice.clone() };
+        return Ok(json!({"enabled": app.flight_recorder.enabled, "notice": app.flight_recorder.notice}));
+    }
+    if id == "diagnostics.capture" && params.as_object().is_none_or(|p| p.is_empty()) {
+        app.flight_recorder.window_open = true;
+        return Ok(json!({"dialog":"flightRecorder"}));
+    }
+    if id == "diagnostics.capture" {
+        let seconds =
+            params.get("seconds").map(|v| v.as_u64().filter(|n| (1..=600).contains(n)).ok_or("seconds must be between 1 and 600")).transpose()?.unwrap_or(600);
+        let path = app.flight_recorder.capture(seconds).map_err(|e| e.to_string())?;
+        app.ui.status.clone_from(&app.flight_recorder.notice);
+        return Ok(json!({"enabled": app.flight_recorder.enabled, "notice": app.flight_recorder.notice, "path": path}));
     }
     if let Some(t) = id.strip_prefix("tool.") {
         let tool = Tool::from_name(t).ok_or_else(|| format!("unknown tool `{t}`"))?;
@@ -483,6 +647,12 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
             app.dialog = Some(crate::Dialog::AudioGain);
             return Ok(json!({"dialog": "audioGain"}));
         }
+        "clip.matchPerformance" if params.as_object().is_none_or(|m| m.is_empty()) => {
+            return crate::panels::performance_match::open(app);
+        }
+        "clip.analyzeMusic" if params.as_object().is_none_or(|m| m.is_empty()) => {
+            return crate::panels::music_analysis::open(app);
+        }
         // Colour dialogs from the menus; with params the engine command applies directly.
         "clip.interpretFootage" if params.get("colorSpace").is_none() && params.get("pixelAspect").is_none() => {
             filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session))?;
@@ -555,7 +725,9 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
         // *after* them still wins; media that was already there when Copy/Cut ran is ignored so
         // Paste of cut/copied clips still works (#697).
         "edit.paste" | "edit.pasteInsert"
-            if params.as_object().is_none_or(|m| m.is_empty()) && matches!(app.ui.focused, PanelKind::Timeline | PanelKind::Project) =>
+            if params.as_object().is_none_or(|m| m.is_empty())
+                && matches!(app.ui.focused, PanelKind::Timeline | PanelKind::Project)
+                && !(id == "edit.paste" && app.ui.focused == PanelKind::Timeline && app.session.state.clipboard_transition.is_some()) =>
         {
             if let Some(r) = paste_clipboard_media(app, id == "edit.pasteInsert") {
                 return r;
@@ -619,7 +791,9 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
     };
     if filled_clipboard {
         remember_stale_clipboard_media(app);
-        put_clip_names_on_system_clipboard(app, ctx);
+        if app.session.state.clipboard_transition.is_none() {
+            put_clip_names_on_system_clipboard(app, ctx);
+        }
     }
     r
 }
@@ -1004,6 +1178,13 @@ pub fn external_commands() -> Vec<filmcraft_engine::shortcuts::CommandInfo> {
     use filmcraft_engine::shortcuts::CommandInfo;
     let mut v: Vec<CommandInfo> =
         UI_COMMANDS.iter().chain(crate::panels::keyboard::COMMANDS).map(|c| CommandInfo::new(c.id, c.label, c.menu, c.shortcut)).collect();
+    // Keep M available for Add Marker in every panel. On macOS the Timeline-only
+    // Marquee chord uses the distinct Control and Command keys; elsewhere those
+    // keys fold together and would shadow Cmd+M (Export), so use Shift+V.
+    if let Some(command) = v.iter_mut().find(|c| c.id == "tool.marquee") {
+        let keys = if cfg!(target_os = "macos") { "Cmd+Ctrl+M" } else { "Shift+V" };
+        command.defaults = vec![(keys.into(), Some("Timeline".into()))];
+    }
     for p in PanelKind::ALL {
         v.push(CommandInfo::new(&panel_command_id(p), p.title(), &["Window"], p.window_shortcut()));
     }

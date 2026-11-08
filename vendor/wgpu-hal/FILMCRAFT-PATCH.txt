@@ -1,0 +1,22 @@
+wgpu-hal 30.0.1 — retained third-party dependency (MIT OR Apache-2.0)
+
+Source: https://crates.io/crates/wgpu-hal/30.0.1
+Upstream repository: https://github.com/gfx-rs/wgpu
+Archive SHA256: b6b7fb58561a792bc237628ba0792e332de418fefe145f13b5ed8201e6d52f58
+Original license texts: LICENSE.MIT and LICENSE.APACHE (retained unchanged).
+
+FilmCraft patch: enable the existing CAMetalLayer drawable timeout on macOS only.
+The setting is applied during each surface configuration, preserving upstream policy on other
+Apple platforms. A safe private helper and macOS native-property regression cover initial
+configuration and reconfiguration. No new unsafe block, OS binding, or project FFI is added.
+Upstream dependency implementation remains outside FilmCraft's workspace; AGENTS.md is unchanged.
+
+The native property test fails with upstream's false policy and passes with the patch. It does
+not prove drawable starvation was reproduced or that driver/kernel stalls cannot occur. Apple
+documents roughly one second then nil when the timeout is enabled; the existing backend maps
+nil to SurfaceError::Timeout. Existing occlusion handling remains intact.
+https://developer.apple.com/documentation/quartzcore/cametallayer/allowsnextdrawabletimeout
+
+Packaging changes: upstream Cargo.lock omitted (the product uses its root Cargo.lock); standalone
+workspace and ignore rules permit isolated dependency testing without changing the product lock.
+All other published package files remain unchanged. Do not edit the global Cargo registry.

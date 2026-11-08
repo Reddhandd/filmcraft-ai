@@ -230,8 +230,22 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     ctx.request_repaint();
 }
 
+/// Refresh device metadata while preserving every unsaved setting in the dialog.
+fn refresh_input(app: &FilmcraftApp, draft: &mut Draft) -> Option<String> {
+    let input = app.session.voiceover.input.as_ref()?;
+    let device = if draft.prefs.source.is_empty() { app.session.prefs.audio_hardware.default_input.as_str() } else { draft.prefs.source.as_str() };
+    draft.channels = input.channels(device).min(256);
+    draft.devices = input.devices();
+    if draft.channels > 0 {
+        draft.prefs.input_channel = draft.prefs.input_channel.min(u32::from(draft.channels.min(64).saturating_sub(1)));
+    }
+    input.discovery_error()
+}
+
 fn settings_dialog(app: &mut FilmcraftApp, ctx: &egui::Context) {
     let Some(Some(mut d)) = ctx.data(|m| m.get_temp::<Option<Draft>>(draft_id())) else { return };
+    let discovery_error = refresh_input(app, &mut d);
+    ctx.request_repaint_after(std::time::Duration::from_secs(1));
     crate::widgets::revert_drag_on_escape(ctx, egui::Id::unique("voiceover-settings-before-drag"), &mut d);
     let mut elems: Vec<(String, Rect, String)> = Vec::new();
     let mut close = false;
@@ -265,7 +279,9 @@ fn settings_dialog(app: &mut FilmcraftApp, ctx: &egui::Context) {
                 let device = if d.prefs.source.is_empty() { app.session.prefs.audio_hardware.default_input.as_str() } else { d.prefs.source.as_str() };
                 if let Some(input) = app.session.voiceover.input.as_ref() {
                     d.channels = input.channels(device);
-                    d.prefs.input_channel = d.prefs.input_channel.min(u32::from(d.channels.saturating_sub(1)));
+                    if d.channels > 0 {
+                        d.prefs.input_channel = d.prefs.input_channel.min(u32::from(d.channels.saturating_sub(1)));
+                    }
                 }
             }
             ui.end_row();
@@ -298,6 +314,11 @@ fn settings_dialog(app: &mut FilmcraftApp, ctx: &egui::Context) {
             elems.push(("voiceover.postroll".into(), r.rect, format!("{}", d.prefs.postroll_seconds)));
             ui.end_row();
         });
+        if let Some(error) = &discovery_error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        } else if d.channels == 0 {
+            ui.label(tl!("Detecting microphone input channels…"));
+        }
         ui.label(
             RichText::new(tl!("Playback starts the pre-roll before the playhead (or the In point); with In/Out marked, recording punches in and out there."))
                 .weak()
@@ -358,4 +379,55 @@ fn settings_dialog(app: &mut FilmcraftApp, ctx: &egui::Context) {
         }
     }
     ctx.data_mut(|m| m.insert_temp(draft_id(), if close { None } else { Some(d) }));
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    use filmcraft_engine::voiceover::{AudioInput, InputFormat};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU16, Ordering},
+    };
+    struct Pending(Arc<AtomicU16>);
+    impl AudioInput for Pending {
+        fn devices(&self) -> Vec<String> {
+            if self.0.load(Ordering::Acquire) > 0 { vec!["Named input".into()] } else { Vec::new() }
+        }
+        fn channels(&self, _: &str) -> u16 {
+            self.0.load(Ordering::Acquire)
+        }
+        fn start(&mut self, _: &str, _: u32) -> Result<InputFormat, String> {
+            Err("not used".into())
+        }
+        fn read(&mut self, _: usize) -> Vec<Vec<f32>> {
+            Vec::new()
+        }
+        fn discard(&mut self) {}
+        fn stop(&mut self) {}
+    }
+    #[test]
+    fn async_metadata_refresh_preserves_draft_and_updates_late_channels() {
+        let count = Arc::new(AtomicU16::new(0));
+        let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
+        app.session.voiceover.input = Some(Box::new(Pending(count.clone())));
+        let mut draft = Draft::default();
+        draft.prefs.name = "Unsaved take name".into();
+        draft.prefs.source = "Named input".into();
+        draft.prefs.input_channel = 7;
+        assert!(refresh_input(&app, &mut draft).is_none());
+        assert_eq!(draft.channels, 0);
+        assert_eq!(draft.prefs.input_channel, 7);
+        count.store(8, Ordering::Release);
+        refresh_input(&app, &mut draft);
+        assert_eq!(draft.channels, 8);
+        assert_eq!(draft.devices, ["Named input"]);
+        assert_eq!(draft.prefs.input_channel, 7);
+        count.store(2, Ordering::Release);
+        refresh_input(&app, &mut draft);
+        assert_eq!(draft.prefs.input_channel, 1);
+        assert_eq!(draft.prefs.name, "Unsaved take name");
+        assert_eq!(draft.prefs.source, "Named input");
+        assert_ne!(app.session.prefs.voice_over.name, draft.prefs.name);
+    }
 }

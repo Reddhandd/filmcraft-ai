@@ -69,6 +69,7 @@ impl FilmcraftApp {
         self.pending_timeline_drop = None;
         panels::dialogs::show(self, &ctx);
         updates_ui::show(self, &ctx);
+        crate::console::show(self, &ctx);
         if !self.ui.show_status_bar {
             return;
         }
@@ -85,7 +86,11 @@ impl FilmcraftApp {
                 ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
             }
         }
-        let hint = if !self.ui.status.is_empty() { self.ui.status.clone() } else { self.hint_text() };
+        let hint = if !self.ui.status.is_empty() {
+            self.ui.status.clone()
+        } else {
+            self.audio.as_ref().and_then(|audio| audio.note()).unwrap_or_else(|| self.hint_text())
+        };
         ui.painter().text(egui::pos2(sb.min.x + 10.0, sb.center().y), egui::Align2::LEFT_CENTER, hint, Tokens::ui(11.0), t.text_dim);
         let resp = ui.interact(sb, egui::Id::unique("status-bar"), egui::Sense::click());
         if resp.clicked() {
@@ -132,27 +137,20 @@ impl FilmcraftApp {
         use std::sync::atomic::Ordering;
         let Some(job) = self.running_job() else { return };
         let f = job.progress.fraction().clamp(0.0, 1.0);
-        let left = job.progress.eta().map(panels::left_text).unwrap_or_default();
+        let progress_text = panels::job_progress_text(&job.label, &job.progress);
         let cancel = egui::Rect::from_center_size(egui::pos2(sb.max.x - 14.0, sb.center().y), egui::vec2(14.0, 14.0));
         let bar = egui::Rect::from_min_size(egui::pos2(cancel.min.x - 128.0, sb.center().y - 3.0), egui::vec2(120.0, 6.0));
         let p = ui.painter();
         p.rect_filled(bar, 3.0, t.separator);
         p.rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * f, bar.height())), 3.0, t.accent);
-        let verb = if job.label.starts_with("Rendering") { crate::i18n::t(&job.label).to_string() } else { tl!("Exporting").to_string() };
-        p.text(
-            egui::pos2(bar.min.x - 8.0, sb.center().y),
-            egui::Align2::RIGHT_CENTER,
-            format!("{verb}… {:.0}%{left}", f * 100.0),
-            Tokens::ui(11.0),
-            t.text_dim,
-        );
+        p.text(egui::pos2(bar.min.x - 8.0, sb.center().y), egui::Align2::RIGHT_CENTER, &progress_text, Tokens::ui(11.0), t.text_dim);
         let resp = ui.interact(cancel, egui::Id::unique(("job-cancel", job.id)), egui::Sense::click());
         let c = if resp.hovered() { t.hot_text } else { t.text_dim };
         let k = 3.5;
         p.line_segment([cancel.center() - egui::vec2(k, k), cancel.center() + egui::vec2(k, k)], egui::Stroke::new(1.4, c));
         p.line_segment([cancel.center() + egui::vec2(-k, k), cancel.center() + egui::vec2(k, -k)], egui::Stroke::new(1.4, c));
         self.auto.add("status.job.cancel", cancel, &format!("Cancel {}", job.label));
-        self.auto.add("status.job.progress", bar, &format!("{:.0}%{left}", f * 100.0));
+        self.auto.add("status.job.progress", bar, &progress_text);
         if resp.on_hover_text(tl!("Cancel")).clicked() {
             job.progress.cancel.store(true, Ordering::Relaxed);
             self.watched_render = None;

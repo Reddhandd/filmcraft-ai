@@ -36,8 +36,9 @@ impl FilmcraftApp {
         let ime_document_epoch = session.document_epoch;
         let ime_active_sequence = session.state.active_sequence;
         Self {
+            flight_recorder: Default::default(),
             session,
-            ui: UiState { language, ..UiState::default() },
+            ui: UiState { language, status: frames.startup_error().unwrap_or_default().to_string(), ..UiState::default() },
             tokens: Tokens::for_kind(ThemeKind::Dark),
             frames,
             playback: Playback { speed: 1.0, ..Default::default() },
@@ -48,6 +49,8 @@ impl FilmcraftApp {
             // Unsaved changes left by a session that died are offered first thing.
             dialog: recovery.then_some(Dialog::Recovery),
             updates_rt: Default::default(),
+            assistants: Default::default(),
+            api_setup: Default::default(),
             file_dialogs: Default::default(),
             native_dialog: None,
             auto: Default::default(),
@@ -224,6 +227,11 @@ impl FilmcraftApp {
             self.fps = self.fps * 0.9 + (1.0 / dt).min(480.0) * 0.1;
         }
         self.last_time = now;
+        let recorder_notice = self.flight_recorder.notice.clone();
+        self.flight_recorder.sample(self.session.revision, &self.session.journal, self.fps, self.session.is_dirty());
+        if self.flight_recorder.notice != recorder_notice && !self.flight_recorder.notice.is_empty() {
+            self.ui.status.clone_from(&self.flight_recorder.notice);
+        }
         if self.playback.playing && ctx.input(|i| i.viewport().visible()) == Some(false) {
             // Nothing is shown while the window is hidden: not a dropped frame.
             self.playback.hidden = true;
@@ -307,6 +315,9 @@ impl FilmcraftApp {
         let now = self.logic_clock(ctx);
         self.logic_control(ctx);
         self.logic_background(ctx, now);
+        if let Some(audio) = self.audio.as_mut() {
+            audio.poll();
+        }
         self.logic_session_events(now);
         self.logic_command_inbox(ctx);
         self.advance_playback(ctx);
@@ -483,6 +494,9 @@ impl eframe::App for FilmcraftApp {
     /// Cancel outstanding screenshots with one error reply each, end per-viewport IME reset
     /// state, and shut the session down so its recovery journal is flushed or removed.
     fn on_exit(&mut self) {
+        if let Err(error) = crate::console::assistants::flush(self) {
+            log::error!("Assistant checkpoint could not finish before close: {error}");
+        }
         // Late screenshot callbacks now find a dropped slot and write nothing; clients get one error.
         capture::cancel_all(self);
         for viewport in self.ime_viewports.drain(..) {

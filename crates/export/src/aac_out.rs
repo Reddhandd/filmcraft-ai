@@ -46,9 +46,13 @@ impl Sink {
         Ok(())
     }
 
-    fn finish(self, settings: &ExportSettings) -> Result<u64> {
+    fn finish(self, settings: &ExportSettings, samples: u64, rate: u32, priming: u32, packet: u32) -> Result<u64> {
         match self {
-            Sink::Mp4 { mux, .. } => mux.finish().map_err(|e| ExportError::Io(e.to_string()))?.finish(settings),
+            Sink::Mp4 { mux, .. } => {
+                let mut out = mux.finish().map_err(|e| ExportError::Io(e.to_string()))?;
+                out.finalize_aac_timing(samples, rate, priming, packet)?;
+                out.finish(settings)
+            }
             Sink::Adts { out, .. } => out.finish(settings),
         }
     }
@@ -149,8 +153,9 @@ pub(crate) fn export(
             progress.done.fetch_add(1, Ordering::Relaxed);
         }
     }
+    progress.set_phase(crate::ProgressPhase::Finalizing);
     sink.write(enc.flush()?)?;
-    let n = sink.finish(settings)?;
+    let n = sink.finish(settings, frames, a.sr, enc.priming(), enc.frame_size())?;
     if settings.part_of_batch {
         progress.done.store(1, Ordering::Relaxed);
     }

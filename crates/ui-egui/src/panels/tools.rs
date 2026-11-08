@@ -15,6 +15,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if ui.input(|i| i.pointer.any_pressed()) {
         ui.data_mut(|d| d.remove::<egui::Id>(held_id));
     }
+    let shortcut_rect = Rect::from_center_size(pos2(rect.center().x, rect.max.y - 18.0), vec2(size, size));
     for group in Tool::groups() {
         let current = if group.contains(&app.ui.tool) { app.ui.tool } else { group[0] };
         let r = Rect::from_min_size(pos2(rect.center().x - size / 2.0, y), vec2(size, size));
@@ -86,9 +87,16 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             });
         }
         y += size + 4.0;
-        if y > rect.max.y - size {
+        if y > shortcut_rect.min.y - size {
             break;
         }
+    }
+    let response = ui.put(shortcut_rect, egui::Button::new("…")).on_hover_text(crate::i18n::t("Keyboard Shortcuts…"));
+    app.auto.add_response("tools.shortcuts", &response, "Keyboard Shortcuts");
+    if response.clicked()
+        && let Err(error) = crate::menus::invoke(app, &ui.ctx().clone(), "app.keyboardShortcuts", serde_json::json!({}))
+    {
+        app.ui.status = error;
     }
 }
 

@@ -111,6 +111,15 @@ impl FilmcraftApp {
         let mut candidates: Vec<&menus::KeyBinding> = panel.chain(app_wide).collect();
         candidates.sort_by_key(|b| std::cmp::Reverse(menus::specificity(b.0)));
         for (m, k, id, _) in candidates {
+            if *k == egui::Key::Enter
+                && (self.dialog.is_some()
+                    || self.ui.clip_dialog.is_some()
+                    || self.ui.music_analysis.is_some()
+                    || self.ui.performance_match.is_some()
+                    || self.flight_recorder.window_open)
+            {
+                continue;
+            }
             // With a text field focused, an unmodified key belongs to the field (and to the input
             // method composing in it), not to a tool shortcut: `J`, `Z`, `R`, `A`… are the keys
             // Vietnamese Telex combines into diacritics (#243). Chords with a modifier stay:

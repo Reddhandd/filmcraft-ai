@@ -382,3 +382,42 @@ fn max_threads_is_a_setting_of_the_json_interface() {
     assert_eq!(ExportSettings::default().max_threads, 0, "all cores unless asked");
     assert_eq!(serde_json::to_value(&s).unwrap()["maxThreads"], serde_json::json!(2));
 }
+
+#[test]
+fn finalization_stays_pending_after_the_last_real_frame_and_can_be_cancelled() {
+    for cancel in [false, true] {
+        let (project, seq, sources) = project();
+        let settings = ExportSettings {
+            format: Format::Mjpeg,
+            path: tmp(if cancel { "tail-cancel.mov" } else { "tail-finish.mov" }),
+            include_audio: false,
+            ..Default::default()
+        };
+        let progress = Progress::default();
+        let mut exporter = Exporter::new(project, seq, &settings, &progress).unwrap();
+        exporter.set_batch(4);
+        let mut at_tail = false;
+        for _ in 0..64 {
+            assert!(matches!(exporter.step(&sources, &progress).unwrap(), Step::Progress));
+            if progress.done.load(Ordering::Relaxed) == progress.total.load(Ordering::Relaxed) {
+                at_tail = true;
+                break;
+            }
+        }
+        assert!(at_tail, "real frame batches must reach the finalization boundary");
+        assert_eq!(progress.phase(), ProgressPhase::Finalizing);
+        assert_eq!(progress.status_text(), "Finalizing");
+        assert!(!progress.finished.load(Ordering::Relaxed));
+        assert_eq!(progress.eta(), None);
+        if cancel {
+            progress.cancel.store(true, Ordering::Relaxed);
+            assert!(matches!(exporter.step(&sources, &progress), Err(ExportError::Cancelled)));
+            assert!(!progress.finished.load(Ordering::Relaxed));
+        } else {
+            assert!(matches!(exporter.step(&sources, &progress).unwrap(), Step::Done(_)));
+            assert!(progress.finished.load(Ordering::Relaxed));
+            assert!(progress.status_text().starts_with("Done in "));
+            assert!(std::fs::metadata(&settings.path).unwrap().len() > 0);
+        }
+    }
+}

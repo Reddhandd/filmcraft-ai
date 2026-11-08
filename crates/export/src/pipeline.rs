@@ -242,10 +242,10 @@ impl Pipeline {
         let t = self.rate.tick_of(f);
         // The registered GPU renderer goes first; `None` (no adapter, a plan the GPU cannot
         // draw, any internal error) falls back to the CPU reference renderer below. A frame the
-        // planner hands back as one CPU image anyway (an adjustment layer, a complex transition,
+        // export renders directly on the CPU (an adjustment composite, complex transition,
         // HDR) does not take a pooled renderer: it would render on the CPU inside the pool, as
         // many frames at a time as there are renderers instead of one per export thread.
-        let pool = self.renderer.as_ref().filter(|_| !filmcraft_render::plan::is_cpu_frame(&self.project, self.seq, t));
+        let pool = self.renderer.as_ref().filter(|_| !filmcraft_render::plan::is_cpu_export_frame(&self.project, self.seq, t));
         let gpu = match pool {
             Some(pool) => {
                 let asked = web_time::Instant::now();

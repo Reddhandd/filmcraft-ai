@@ -224,3 +224,22 @@ fn captions_copy_cut_and_paste() {
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!(caption_spans(&s).len(), 1);
 }
+
+#[test]
+fn caption_and_transition_copy_replace_each_others_clipboards() {
+    let mut s = demo();
+    let clip = s.active_sequence().unwrap().video_tracks[0].items[2].id;
+    let transition =
+        s.execute("sequence.applyVideoTransition", json!({"clip": clip.0, "edge":"in", "effect":"wipe", "frames":12})).unwrap()["transition"].as_u64().unwrap();
+    s.execute("sequence.copyTransition", json!({"transition":transition})).unwrap();
+    s.execute("captions.add", json!({"text":"caption", "durationSeconds":1.0})).unwrap();
+    s.execute("edit.copy", json!({})).unwrap();
+    assert!(s.state.clipboard_transition.is_none());
+    assert_eq!(s.state.caption_clipboard.len(), 1);
+    s.execute("playhead.set", json!({"seconds":5.0})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(caption_spans(&s).len(), 2);
+    s.execute("sequence.copyTransition", json!({"transition":transition})).unwrap();
+    assert!(s.state.caption_clipboard.is_empty());
+    assert!(s.state.clipboard_transition.is_some());
+}

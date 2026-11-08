@@ -207,6 +207,37 @@ mod tests {
     }
 
     #[test]
+    fn counted_units_can_wait_thirty_seconds_for_finalization_without_a_zero_eta() {
+        use crate::{Progress, ProgressPhase};
+        use std::sync::atomic::Ordering;
+        let progress = Progress::default();
+        let t0 = Instant::now();
+        progress.total.store(100, Ordering::Relaxed);
+        for i in 0..=10 {
+            progress.done.store(i * 10, Ordering::Relaxed);
+            progress.eta_at(at(t0, i as f64));
+        }
+        for seconds in [10.0, 20.0, 40.0] {
+            assert_eq!(progress.phase(), ProgressPhase::Finalizing);
+            assert_eq!(progress.eta_at(at(t0, seconds)), None);
+            assert!(!progress.finished.load(Ordering::Relaxed));
+        }
+        assert_eq!(progress.done.load(Ordering::Relaxed), 100);
+        progress.cancel.store(true, Ordering::Relaxed);
+        assert!(!progress.finished.load(Ordering::Relaxed));
+        // A segment can be finalizing while later segments still have units to process.
+        let batch = Progress::default();
+        batch.total.store(200, Ordering::Relaxed);
+        batch.done.store(100, Ordering::Relaxed);
+        batch.set_phase(ProgressPhase::Finalizing);
+        assert_eq!(batch.phase(), ProgressPhase::Finalizing);
+        assert_eq!(batch.eta_at(t0), None);
+        batch.set_phase(ProgressPhase::Processing);
+        assert_eq!(batch.phase(), ProgressPhase::Processing);
+        assert_ne!(batch.status_text(), "Finalizing");
+    }
+
+    #[test]
     fn extreme_numbers_give_a_capped_estimate_or_none_and_never_panic() {
         // almost no progress against a huge total: capped
         let e = eta(&[(0.0, 0), (10.0, 1)], u64::MAX).unwrap();

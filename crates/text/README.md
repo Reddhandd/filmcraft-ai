@@ -29,3 +29,25 @@ on an M-series Mac: about 1.6 ms cold (shaping, outline extraction, glyph raster
 OpenType
 feature toggles beyond kerning/ligatures, variable-font axes, hinting, colour (emoji) glyphs, and
 hyphenation. Words longer than an area-text line overflow instead of breaking mid-word.
+
+## Font-picker previews (integration in progress)
+
+`preview::family` renders a bounded family-name mask using temporary font bytes, shaping data
+and outlines. It reads catalog metadata without registering faces or filling the permanent
+font/layout/glyph caches. File-backed fonts require a regular file; missing, unreadable or invalid
+faces return `PreviewError`. Hosts must call this path on a bounded worker for filesystem fonts.
+The renderer supports bidi runs and caps labels, glyphs, outline work, output size (960×96)
+and extracted per-face bytes (64 MiB). It does not substitute another family silently.
+
+Temporary SFNT/TTC face extraction follows **OpenType 1.9.1**, “The OpenType Font File”, table
+directory, checksums and font-collection sections:
+<https://learn.microsoft.com/en-us/typography/opentype/spec/otff>.
+Only the requested face's tables are read; source files are untouched. This API does not by
+itself qualify the native font picker, background worker or optional craft-fonts configurations.
+
+System font discovery also bounds its input: at most 64 configured roots, 65,536 directory
+entries, 8,192 files, 8 MiB of retained paths, 16,384 faces and 32 MiB of retained metadata.
+Directory symlinks are not followed. Oversized family/style names are omitted, and
+`fonts::discovery_limited()` lets the UI report truncation. First-registration identity and
+ASCII-case-insensitive family/style deduplication are preserved; catalog insertion uses a set
+to avoid a quadratic duplicate search while holding the database lock.

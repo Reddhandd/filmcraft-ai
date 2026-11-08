@@ -43,13 +43,36 @@ impl Out {
             let file = file.try_clone().map_err(|e| ExportError::Io(e.to_string()))?;
             return Ok(Out::File(std::io::BufWriter::new(file)));
         }
-        let f = std::fs::File::create(path).map_err(|e| ExportError::Io(format!("{path}: {e}")))?;
+        let f =
+            std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(path).map_err(|e| ExportError::Io(format!("{path}: {e}")))?;
         Ok(Out::File(std::io::BufWriter::new(f)))
     }
 
     /// Flush (and hand in-memory output to the sink); returns the file size.
     pub(crate) fn finish(self, settings: &ExportSettings) -> Result<u64> {
         self.finish_path(settings, &settings.path)
+    }
+
+    /// Finish AAC edit duration and roll groups in the trailing movie atom. The shared
+    /// container writer does not yet expose sample groups. Read only `moov`, not `mdat`.
+    pub(crate) fn finalize_aac_timing(&mut self, samples: u64, rate: u32, priming: u32, packet: u32) -> Result<()> {
+        use std::io::{Seek, SeekFrom};
+        let io = |e: std::io::Error| ExportError::Io(e.to_string());
+        match self {
+            Out::File(w) => {
+                w.flush().map_err(io)?;
+                let mut reader = w.get_ref().try_clone().map_err(io)?;
+                let (at, moov) = aac_timing::prepare(&mut reader, samples, rate, priming, packet)?;
+                w.seek(SeekFrom::Start(at)).map_err(io)?;
+                w.write_all(&moov).map_err(io)?;
+            }
+            Out::Mem(w) => {
+                let (at, moov) = aac_timing::prepare(&mut std::io::Cursor::new(w.get_ref().as_slice()), samples, rate, priming, packet)?;
+                w.seek(SeekFrom::Start(at)).map_err(io)?;
+                w.write_all(&moov).map_err(io)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn finish_path(self, settings: &ExportSettings, path: &str) -> Result<u64> {

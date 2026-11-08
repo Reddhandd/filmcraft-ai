@@ -360,3 +360,57 @@ fn a_nest_that_is_not_plain_is_still_drawn_right() {
         assert!(w < 0.01, "{what}: plan and reference differ by {w}");
     }
 }
+
+#[test]
+fn transformed_nest_plan_defers_placement_and_preserves_masks() {
+    use filmcraft_project::{Mask, MaskPath};
+    for masked in [false, true] {
+        let mut r = Rig::new();
+        let media = r.matte([0.3, 0.6, 0.1, 0.7], 80, 60);
+        let inner = r.seq("inner", 80, 60, FrameRate::FPS_24);
+        r.put(inner, media, 48);
+        let outer = r.seq("outer", 96, 72, FrameRate::FPS_24);
+        let nest = r.put(outer, inner, 48);
+        let clip = r.clip(outer, nest);
+        clip.effect_mut("motion").unwrap().params.get_mut("scale").unwrap().value = ParamValue::Float(175.0);
+        clip.effect_mut("motion").unwrap().params.get_mut("rotation").unwrap().value = ParamValue::Float(0.0);
+        clip.effect_mut("opacity").unwrap().params.get_mut("opacity").unwrap().value = ParamValue::Float(65.0);
+        if masked {
+            clip.effect_mut("opacity").unwrap().masks.push(Mask::new("private test mask", MaskPath::rect(12.5, 9.0, 60.0, 48.0)));
+        }
+        let t = FrameRate::FPS_24.tick_of(12);
+        let plan = plan::plan_frame(&r.p, outer, t, RenderOptions::default(), &r.map);
+        let plan::FramePlan::Layers { layers, .. } = &plan else { panic!("expected isolated nested layer") };
+        assert_eq!(layers.len(), 1);
+        assert_ne!(layers[0].matrix, filmcraft_geom::Affine::IDENTITY, "nested placement must reach the compositor instead of a CPU canvas");
+        assert_eq!((layers[0].frame.width, layers[0].frame.height), (80, 60));
+        assert!(worst(&plan::execute_cpu(&plan), &r.frame(outer, t)) < 1e-6, "mask={masked}");
+    }
+}
+
+#[test]
+fn nested_working_image_budget_is_checked_before_resolving_media() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut r = Rig::new();
+    let media = r.matte(RED, 80, 60);
+    let inner = r.seq("inner", 80, 60, FrameRate::FPS_24);
+    r.put(inner, media, 48);
+    let outer = r.seq("outer", 96, 72, FrameRate::FPS_24);
+    let nest = r.put(outer, inner, 48);
+    r.clip(outer, nest).effect_mut("motion").unwrap().params.get_mut("scale").unwrap().value = ParamValue::Float(175.0);
+    let lookups = AtomicUsize::new(0);
+    let sources = |id| {
+        lookups.fetch_add(1, Ordering::SeqCst);
+        r.map.source(id)
+    };
+    let seq = r.p.sequence(outer).unwrap();
+    let clip = seq.find_item(nest).unwrap().1;
+    let bytes = 80 * 60 * 4 * std::mem::size_of::<f32>();
+    for budget in [0, bytes - 1] {
+        assert!(nested_working_layer(&r.p, seq, clip, Tick::ZERO, RenderOptions::default(), &sources, "", budget).is_none());
+        assert_eq!(lookups.load(Ordering::SeqCst), 0, "reject before decoding/rendering the nested source");
+    }
+    let (image, _, _, _) = nested_working_layer(&r.p, seq, clip, Tick::ZERO, RenderOptions::default(), &sources, "", bytes).unwrap();
+    assert_eq!(image.px.len() * std::mem::size_of::<f32>(), bytes);
+    assert!(lookups.load(Ordering::SeqCst) > 0);
+}

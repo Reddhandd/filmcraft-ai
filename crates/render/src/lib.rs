@@ -505,11 +505,81 @@ pub(crate) fn item_layer_ex(
         // anything else takes the general path below, with the frame already fetched
         fetched = Some((src, frame, n));
     }
-    let mut layer = match fetched {
+    let layer = match fetched {
         Some((src, frame, n)) => media_image(project, seq, item, t, &src, &frame, n, want),
         None => base_layer(project, seq, item, t, opts, sources, want)?,
     };
-    let px_scale = layer.w as f32 / src_size.0.max(1) as f32;
+    let (layer, m) = finish_working_layer(layer, project, seq, item, t, opts, sources, tc, src_size.0, motion, want)?;
+    let placed = if layer.w == w && layer.h == h && identity_placement(&m) { layer } else { layer.transformed(w, h, &m) };
+    let (op, bl) = opacity_blend(item, mt);
+    Some(Layer::Full { image: placed, opacity: op, blend: bl, opaque: false })
+}
+
+/// CPU working pixels with effects and masks applied, before Motion places them. The GPU can
+/// place a rendered nest without first resampling it into a second CPU canvas.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn nested_working_layer(
+    project: &Project,
+    seq: &Sequence,
+    item: &TrackItem,
+    t: Tick,
+    opts: RenderOptions,
+    sources: &dyn SourceProvider,
+    tc: &str,
+    byte_budget: usize,
+) -> Option<(Image, Affine, f32, Blend)> {
+    let size = source_size(project, item.item)?;
+    let mt = item.effect_time_at(t);
+    let motion = motion_matrix(seq, item, size, source_par(project, item.item), mt);
+    let lin = ((motion.a * motion.a + motion.b * motion.b).sqrt()).max((motion.c * motion.c + motion.d * motion.d).sqrt());
+    let want = (lin * opts.scale as f64).clamp(1.0 / 64.0, 1.0) as f32;
+    // A GPU quad clips at its geometry edges, while CPU placement samples a transparent
+    // bilinear border. Keep visible edges/rotation on the exact CPU path. A one-pixel margin
+    // also covers rounding of reduced nested dimensions. Zoomed, cropped nests need no border.
+    let placement = Affine::scale(opts.scale as f64, opts.scale as f64).then_apply(&motion);
+    let bounds = placement.bounds(&filmcraft_geom::Rect::new(0.0, 0.0, f64::from(size.0), f64::from(size.1)));
+    let (width, height) = output_size(seq, opts.scale);
+    if placement.b != 0.0
+        || placement.c != 0.0
+        || ![bounds.x, bounds.y, bounds.right(), bounds.bottom()].iter().all(|v| v.is_finite())
+        || bounds.x > -1.0
+        || bounds.y > -1.0
+        || bounds.right() < width as f64 + 1.0
+        || bounds.bottom() < height as f64 + 1.0
+    {
+        return None;
+    }
+    let nested = project.sequence(item.item)?;
+    let (source_width, source_height) = output_size(nested, want);
+    let bytes = source_width.checked_mul(source_height)?.checked_mul(4 * std::mem::size_of::<f32>())?;
+    if bytes > byte_budget {
+        return None;
+    }
+    let layer = base_layer(project, seq, item, t, opts, sources, want)?;
+    if layer.w == 0 || layer.h == 0 {
+        return None;
+    }
+    let (layer, matrix) = finish_working_layer(layer, project, seq, item, t, opts, sources, tc, size.0, motion, want)?;
+    let (opacity, blend) = opacity_blend(item, mt);
+    Some((layer, matrix, opacity, blend))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_working_layer(
+    mut layer: Image,
+    project: &Project,
+    seq: &Sequence,
+    item: &TrackItem,
+    t: Tick,
+    opts: RenderOptions,
+    sources: &dyn SourceProvider,
+    tc: &str,
+    source_width: u32,
+    motion: Affine,
+    want: f32,
+) -> Option<(Image, Affine)> {
+    let mt = item.effect_time_at(t);
+    let px_scale = layer.w as f32 / source_width.max(1) as f32;
     // layer px → source px → sequence px → output px
     let m = Affine::scale(opts.scale as f64, opts.scale as f64).then_apply(&motion).then_apply(&Affine::scale(1.0 / px_scale as f64, 1.0 / px_scale as f64));
     if opts.effects {
@@ -533,9 +603,7 @@ pub(crate) fn item_layer_ex(
         }
     }
     mask::apply_opacity_masks(&mut layer, item, mt, px_scale);
-    let placed = if layer.w == w && layer.h == h && identity_placement(&m) { layer } else { layer.transformed(w, h, &m) };
-    let (op, bl) = opacity_blend(item, mt);
-    Some(Layer::Full { image: placed, opacity: op, blend: bl, opaque: false })
+    Some((layer, m))
 }
 
 /// The layer of a plain media frame (see [`item_layer_ex`]): only the part with alpha when the frame

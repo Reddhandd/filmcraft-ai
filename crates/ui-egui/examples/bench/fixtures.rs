@@ -1,8 +1,19 @@
 //! Benchmark fixtures, generated with ffmpeg (an external fixture generator only; never linked or
 //! shipped) into `target/fixtures/playback/` on first use. Never committed.
 
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{collections::BTreeMap, sync::Mutex};
+
+static REQUESTED: Mutex<BTreeMap<String, bool>> = Mutex::new(BTreeMap::new());
+
+#[allow(dead_code, reason = "the shared fixture module also serves the playback-only example")]
+pub fn coverage() -> Value {
+    let requested = REQUESTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let missing: Vec<_> = requested.iter().filter(|(_, found)| !**found).map(|(name, _)| name).collect();
+    json!({"expected": requested.len(), "completed": requested.len().saturating_sub(missing.len()), "skipped": missing.len(), "missing": missing})
+}
 
 /// `<repo>/target/fixtures/playback`, or `$FILMCRAFT_FIXTURES/playback` (lets worktrees share one set).
 pub fn fixtures_dir() -> PathBuf {
@@ -87,6 +98,12 @@ fn has_encoder(ffmpeg: &Path, encoder: &str) -> bool {
 
 /// The fixture `name`, generating it on first use (None when ffmpeg or its encoder is missing).
 pub fn fixture(name: &str) -> Option<PathBuf> {
+    let result = fixture_impl(name);
+    REQUESTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(name.to_string(), result.is_some());
+    result
+}
+
+fn fixture_impl(name: &str) -> Option<PathBuf> {
     let dir = fixtures_dir();
     let path = dir.join(name);
     if path.exists() {

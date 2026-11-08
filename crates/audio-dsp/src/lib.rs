@@ -27,9 +27,11 @@ pub mod effects;
 pub mod fft;
 pub mod loudness;
 pub mod oversample;
+pub mod performance_match;
 pub mod remix;
 pub mod resample;
 mod smooth;
+pub mod song_structure;
 pub mod sync;
 
 pub use effects::{Category, EffectInfo, create_effect, effect_info, effects};

@@ -112,6 +112,24 @@ struct FrameJob {
     apply_film_grain: bool,
     /// Draft mode: the frame refreshes no reference slot, so its in-loop filters are skipped.
     draft: bool,
+    #[cfg(test)]
+    fault: Option<JobFault>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JobFault {
+    BeforeDecode,
+    AfterSetup,
+}
+
+#[cfg(test)]
+impl FrameJob {
+    fn inject_fault(&self, at: JobFault) {
+        if self.fault == Some(at) {
+            panic!("injected AV1 frame job fault: {at:?}");
+        }
+    }
 }
 
 /// A shown picture in output order.
@@ -546,6 +564,8 @@ impl Decoder {
             pts: self.pts,
             apply_film_grain: self.apply_film_grain,
             draft,
+            #[cfg(test)]
+            fault: None,
         }));
         Ok(None)
     }
@@ -655,7 +675,16 @@ impl Decoder {
 /// Decode a frame job and publish its results.
 fn run_job(job: FrameJob, pool: &Pool, stats: &Mutex<DecodeStats>) {
     let mut st = DecodeStats::default();
-    match decode_frame(&job, pool, &mut st) {
+    // Keep the job outside the unwind boundary so both completion slots remain available even
+    // if decoding panics. Publishing the same error to references and pictures wakes every
+    // dependent frame and output reader; the frame worker then accepts its next job.
+    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        #[cfg(test)]
+        job.inject_fault(JobFault::BeforeDecode);
+        decode_frame(&job, pool, &mut st)
+    }))
+    .unwrap_or(Err(Error::Invalid("internal error while decoding a frame")));
+    match decoded {
         Ok((rf, pic)) => {
             if let Some(ps) = &job.picture {
                 ps.set(pic.map(Arc::new).ok_or(Error::Invalid("shown frame without picture")));
@@ -669,9 +698,7 @@ fn run_job(job: FrameJob, pool: &Pool, stats: &Mutex<DecodeStats>) {
             job.slot.set(Err(e));
         }
     }
-    if let Ok(mut s) = stats.lock() {
-        s.merge(&st);
-    }
+    stats.lock().unwrap_or_else(std::sync::PoisonError::into_inner).merge(&st);
 }
 
 /// The whole decoding process of one frame: setup, tiles, post-filters, motion vector storage
@@ -723,6 +750,8 @@ fn decode_frame(job: &FrameJob, pool: &Pool, stats: &mut DecodeStats) -> Result<
         c
     };
     stats.add(Stage::Setup, t.secs());
+    #[cfg(test)]
+    job.inject_fault(JobFault::AfterSetup);
     let t = Timer::start();
     let saved = decode_tiles(pool, &mut fs, &cdfs, &job.tiles)?;
     stats.tiles += job.tiles.len() as u64;
@@ -972,7 +1001,99 @@ fn project(fs: &mut FrameState, src: usize, dst_sign: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::frame_size_allowed;
+    use super::*;
+
+    /// A tiny synthetic frame job: encoded tiles are unnecessary for exercising job completion
+    /// and reference dependencies. Reconstruction starts as zeroed 8-bit luma samples.
+    fn blank_job(pts: i64) -> Box<FrameJob> {
+        Box::new(FrameJob {
+            seq: SequenceHeader {
+                color: crate::header::ColorConfig { bit_depth: 8, mono_chrome: true, num_planes: 1, ..Default::default() },
+                ..Default::default()
+            },
+            fh: FrameHeader {
+                frame_is_intra: true,
+                show_frame: true,
+                primary_ref_frame: PRIMARY_REF_NONE,
+                refresh_frame_flags: 1,
+                frame_width: 8,
+                frame_height: 8,
+                upscaled_width: 8,
+                render_width: 8,
+                render_height: 8,
+                mi_cols: 2,
+                mi_rows: 2,
+                ..Default::default()
+            },
+            refs: Default::default(),
+            ref_info: Default::default(),
+            tiles: Vec::new(),
+            tile_covered: Vec::new(),
+            slot: Slot::new(),
+            picture: Some(Slot::new()),
+            pts,
+            apply_film_grain: false,
+            draft: false,
+            fault: None,
+        })
+    }
+
+    fn assert_frame_error(slot: &FrameSlot) {
+        assert!(matches!(slot.wait(), Err(Error::Invalid("internal error while decoding a frame"))));
+    }
+
+    #[test]
+    fn inline_frame_job_panics_complete_both_slots_and_allow_next_frame() {
+        filmcraft_testkit::with_deadline(30, || {
+            let mut dec = Decoder::with_threads(1);
+            for stage in [JobFault::BeforeDecode, JobFault::AfterSetup] {
+                let mut failed = blank_job(1);
+                failed.fault = Some(stage);
+                let slot = failed.slot.clone();
+                let output = dec.submit(failed).expect("shown frame");
+                assert!(matches!(output.take(), Err(Error::Invalid("internal error while decoding a frame"))));
+                assert_frame_error(&slot);
+                let output = dec.submit(blank_job(2)).expect("next shown frame");
+                let pic = output.take().expect("next frame decodes");
+                assert_eq!((pic.width, pic.height, pic.pts), (8, 8, 2));
+                assert_eq!(pic.planes[0], vec![0; 64]);
+            }
+            drop(dec);
+        });
+    }
+
+    #[cfg(all(feature = "threads", not(target_arch = "wasm32")))]
+    #[test]
+    fn worker_frame_job_panics_release_dependencies_and_keep_worker_alive() {
+        filmcraft_testkit::with_deadline(30, || {
+            for stage in [JobFault::BeforeDecode, JobFault::AfterSetup] {
+                let mut dec = Decoder::with_threads(1);
+                // One frame worker proves the next successful frame uses the surviving worker.
+                dec.workers = Some(Workers::new(1, &dec.pool, &dec.stats).expect("start frame worker"));
+                let mut failed = blank_job(1);
+                failed.fault = Some(stage);
+                let slot = failed.slot.clone();
+                let failed_output = dec.submit(failed).expect("shown failed frame");
+                let mut dependent = blank_job(2);
+                dependent.fh.frame_is_intra = false;
+                dependent.refs[0] = Some(slot.clone());
+                let dependency = dependent.slot.clone();
+                let dependent_output = dec.submit(dependent).expect("shown dependent frame");
+                let next_output = dec.submit(blank_job(3)).expect("shown independent frame");
+
+                assert!(matches!(failed_output.take(), Err(Error::Invalid("internal error while decoding a frame"))));
+                assert_frame_error(&slot);
+                assert!(matches!(dependent_output.take(), Err(Error::Invalid("internal error while decoding a frame"))));
+                assert_frame_error(&dependency);
+                let pic = next_output.take().expect("worker keeps decoding independent frames");
+                assert_eq!((pic.width, pic.height, pic.pts), (8, 8, 3));
+                assert_eq!(pic.planes[0], vec![0; 64]);
+                assert!(dec.flush_result().expect("drain completed jobs").is_empty());
+                // Drop joins the worker; the deadline includes dependency completion and shutdown.
+                drop(dec);
+            }
+        });
+    }
 
     #[test]
     fn frames_up_to_the_level_6_3_limits_are_allowed() {

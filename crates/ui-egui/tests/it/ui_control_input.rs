@@ -222,7 +222,7 @@ fn focus_reports_real_widget_ownership_and_rejects_bad_targets_without_changing_
     }
     d.ok("ui.key", json!({"key":"Tab"}), false);
     let state = d.ok("ui.inspect", json!({}), false);
-    assert_eq!(state["keyboardFocus"]["elementIds"], json!(["tools.TrackSelectForward"]));
+    assert_eq!(state["keyboardFocus"]["elementIds"], json!(["tools.Marquee"]));
     assert_ne!(state["keyboardFocus"]["widgetId"], focus["widgetId"]);
     assert!(!d.h.state().playback.playing);
 }

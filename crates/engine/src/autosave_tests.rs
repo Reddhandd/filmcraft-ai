@@ -35,6 +35,57 @@ fn journaled(s: &mut Session) -> u64 {
     s.persistence.as_ref().unwrap().status.journaled_revision
 }
 
+#[test]
+fn failed_autosave_worker_reports_lost_protection_and_keeps_manual_save_available() {
+    let d = temp_dir("autosave-worker-panic");
+    let mut s = demo();
+    start(&mut s, &d);
+    s.execute("file.newBin", json!({"name": "Unsaved work"})).unwrap();
+    let before = s.project.clone();
+    let history = s.history.undo.len();
+    s.persistence.as_ref().unwrap().run_test_action(|| panic!("injected auto-save failure"));
+    wait_for("worker failure notification", || {
+        s.poll_persistence();
+        !s.persistence.as_ref().unwrap().status.worker_running
+    });
+    assert_eq!(s.project, before);
+    assert_eq!(s.history.undo.len(), history);
+    assert!(s.is_dirty());
+    let status = s.execute("file.autoSaveStatus", json!({})).unwrap();
+    assert_eq!(status["running"], false);
+    assert_eq!(status["status"]["workerRunning"], false);
+    assert!(status["status"]["lastError"].as_str().unwrap().contains("recovery protection is unavailable"));
+    assert!(s.drain_events().iter().any(|event| matches!(event, Event::Toast { message, error: true } if message.contains("recovery protection"))));
+    s.poll_persistence();
+    assert!(!s.drain_events().iter().any(|event| matches!(event, Event::Toast { message, .. } if message.contains("recovery protection"))));
+    let path = d.join("manual.fcproj").to_string_lossy().into_owned();
+    s.execute("file.saveAs", json!({"path": path})).unwrap();
+    let loaded = filmcraft_format::decode(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(loaded.project, *s.project);
+    assert!(!s.is_dirty());
+    s.shutdown();
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[test]
+fn rejected_group_does_not_publish_an_intermediate_recovery_snapshot() {
+    let d = temp_dir("autosave-rejected-group");
+    let mut s = Session::default();
+    start(&mut s, &d);
+    let result: Result<()> = s.edit_group("Rejected", |s| {
+        s.execute("file.newBin", json!({"name": "Temporary"}))?;
+        s.persistence.as_ref().unwrap().flush();
+        assert!(!s.persistence.as_ref().unwrap().session_dir.join("snapshot.fcproj").exists());
+        Err(EngineError::Other("reject".into()))
+    });
+    assert!(result.is_err());
+    assert!(!s.is_dirty());
+    s.persistence.as_ref().unwrap().flush();
+    assert!(!s.persistence.as_ref().unwrap().session_dir.join("snapshot.fcproj").exists());
+    s.shutdown();
+    std::fs::remove_dir_all(d).unwrap();
+}
+
 fn discard_fixture(tag: &str) -> (Session, std::path::PathBuf) {
     let d = temp_dir(tag);
     let mut s = Session::default();
@@ -420,4 +471,220 @@ fn project_captured_folder_outside_the_project_is_not_used() {
     assert_eq!(crate::voiceover::media_dir(&s, &serde_json::Value::Null, "Captured"), inner);
     assert!(s.execute("file.projectSettings.scratchDisks", json!({"captured": "file://192.0.2.1/s/cap"})).is_err());
     let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn recovery_restores_undo_and_redo_for_saved_and_unsaved_projects() {
+    for saved in [false, true] {
+        let d = temp_dir(if saved { "history-recover-saved" } else { "history-recover-unsaved" });
+        let mut original = demo();
+        start(&mut original, &d);
+        if saved {
+            original.execute("file.saveAs", json!({"path":d.join("film.fcproj")})).unwrap();
+        }
+        let baseline = original.project.clone();
+        original.execute("markers.add", json!({"target":"program","name":"First","time":0})).unwrap();
+        let first = original.project.clone();
+        original.execute("markers.add", json!({"target":"program","name":"Second","time":254016000000_i64})).unwrap();
+        let second = original.project.clone();
+        original.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(original.project, first);
+        let undo = original.history.undo.clone();
+        let redo = original.history.redo.clone();
+        original.persistence.take().unwrap().simulate_crash();
+        let mut recovered = Session::default();
+        start(&mut recovered, &d);
+        recovered.execute("file.recover", json!({})).unwrap();
+        assert_eq!(recovered.project, first);
+        assert_eq!(recovered.history.undo, undo);
+        assert_eq!(recovered.history.redo, redo);
+        assert!(recovered.is_dirty());
+        assert_eq!(recovered.path.is_some(), saved);
+        recovered.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(recovered.project, second);
+        // A second crash must also retain the restored-and-extended history.
+        recovered.persistence.take().unwrap().simulate_crash();
+        let mut again = Session::default();
+        start(&mut again, &d);
+        again.execute("file.recover", json!({})).unwrap();
+        again.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(again.project, first);
+        again.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(again.project, baseline);
+        again.shutdown();
+        std::fs::remove_dir_all(d).unwrap();
+    }
+}
+
+#[test]
+fn corrupt_recovery_history_does_not_block_recovering_project() {
+    let d = temp_dir("history-recover-corrupt");
+    let mut original = demo();
+    start(&mut original, &d);
+    original.execute("markers.add", json!({"target":"program","name":"Keep this work","time":0})).unwrap();
+    let expected = original.project.clone();
+    let revision = original.revision;
+    let per = original.persistence.take().unwrap();
+    let dir = per.session_dir.clone();
+    per.simulate_crash();
+    std::fs::write(dir.join(format!("history-{revision}.undo")), b"corrupt").unwrap();
+    let mut recovered = Session::default();
+    start(&mut recovered, &d);
+    recovered.execute("file.recover", json!({})).unwrap();
+    assert_eq!(recovered.project, expected);
+    assert!(recovered.history.undo.is_empty());
+    assert!(recovered.drain_events().iter().any(|e| matches!(e,Event::Toast{message,..} if message.contains("Undo/Redo history was ignored"))));
+    recovered.shutdown();
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[test]
+fn interrupted_mismatched_or_oversized_history_keeps_recovered_project() {
+    for mode in ["missing", "mismatched", "truncated", "oversized", "wrong-generation", "legacy"] {
+        let d = temp_dir(&format!("history-invalid-{mode}"));
+        let mut original = demo();
+        start(&mut original, &d);
+        original.execute("markers.add", json!({"target":"program","time":0,"name":"Preserve work"})).unwrap();
+        let expected = original.project.clone();
+        let revision = original.revision;
+        let per = original.persistence.take().unwrap();
+        let dir = per.session_dir.clone();
+        per.simulate_crash();
+        let path = dir.join(format!("history-{revision}.undo"));
+        match mode {
+            "missing" => std::fs::remove_file(&path).unwrap(),
+            "mismatched" => crate::persistent_history::save_snapshot(
+                &Session::default().project,
+                &History::default(),
+                &dir.join(format!("history-{revision}")).to_string_lossy(),
+            )
+            .unwrap(),
+            "truncated" => std::fs::write(&path, b"FCHISTORY1\n\0\0").unwrap(),
+            "oversized" => std::fs::File::create(&path).unwrap().set_len(256 * 1024 * 1024 + 1).unwrap(),
+            "wrong-generation" | "legacy" => {
+                let meta_path = dir.join("session.json");
+                let mut meta: Value = serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+                if mode == "legacy" {
+                    meta.as_object_mut().unwrap().remove("historyRevision");
+                } else {
+                    meta["historyRevision"] = json!(revision + 1);
+                }
+                std::fs::write(meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let mut recovered = Session::default();
+        start(&mut recovered, &d);
+        recovered.execute("file.recover", json!({})).unwrap();
+        assert_eq!(recovered.project, expected);
+        assert!(recovered.history.undo.is_empty());
+        if mode != "legacy" {
+            assert!(recovered.drain_events().iter().any(|event| matches!(event,Event::Toast{message,..} if message.contains("Undo/Redo"))));
+        }
+        recovered.shutdown();
+        std::fs::remove_dir_all(d).unwrap();
+    }
+}
+
+#[test]
+fn recovery_restores_latest_sequence_view_after_view_only_commands() {
+    let dir = temp_dir("recovery-latest-view");
+    let mut source = demo();
+    let main = source.state.active_sequence.unwrap();
+    let other = ItemId(source.execute("file.newSequence", json!({"name":"Recovered working sequence"})).unwrap()["sequence"].as_u64().unwrap());
+    start(&mut source, &dir);
+    let revision = source.revision;
+    wait_for("initial journal", || journaled(&mut source) == revision);
+    let writes = source.persistence.as_ref().unwrap().status.journals_written;
+    let history_path = source.persistence.as_ref().unwrap().session_dir.join(format!("history-{revision}.undo"));
+    let history_modified = std::fs::metadata(&history_path).unwrap().modified().unwrap();
+    #[cfg(unix)]
+    let history_inode = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(&history_path).unwrap().ino()
+    };
+    source.execute("sequence.open", json!({"item":main.0})).unwrap();
+    source.execute("playhead.set", json!({"seconds":1.0})).unwrap();
+    source
+        .state
+        .timeline_views
+        .insert(other, filmcraft_project::SequenceView { pps: 80.0, scroll: 2.0, v_scroll: 12.0, a_scroll: 7.0, video_track_h: 90.0, audio_track_h: 40.0 });
+    source.execute("sequence.open", json!({"item":other.0})).unwrap();
+    source.execute("playhead.set", json!({"seconds":2.0})).unwrap();
+    assert_eq!(source.revision, revision, "only view state changed");
+    let expected = source.project_view();
+    source.persistence.as_ref().unwrap().flush();
+    source.poll_persistence();
+    assert!(source.persistence.as_ref().unwrap().status.journals_written > writes, "view-only changes must reach the recovery journal");
+    assert_eq!(std::fs::metadata(&history_path).unwrap().modified().unwrap(), history_modified, "view-only journals must not rewrite the Undo stack");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(std::fs::metadata(&history_path).unwrap().ino(), history_inode);
+    }
+    let auto_save = source.persistence.as_ref().unwrap().auto_save_now().unwrap().unwrap();
+    assert_eq!(filmcraft_format::decode(&std::fs::read(auto_save).unwrap()).unwrap().view, Some(expected.clone()));
+    source.persistence.take().unwrap().simulate_crash();
+    let mut recovered = Session::default();
+    start(&mut recovered, &dir);
+    recovered.execute("file.recover", json!({})).unwrap();
+    assert_eq!(recovered.project_view(), expected);
+    assert_eq!(recovered.state.active_sequence, Some(other));
+    recovered.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn recovery_view_rejects_nonfinite_and_missing_sequences_without_rewriting_forever() {
+    let dir = temp_dir("recovery-invalid-view");
+    let mut source = demo();
+    source.execute("markers.add", json!({"target":"program","time":0,"name":"Unsaved work"})).unwrap();
+    let active = source.state.active_sequence.unwrap();
+    let invalid = ItemId(u64::MAX);
+    let view = filmcraft_project::SequenceView { pps: f64::NAN, scroll: f64::INFINITY, v_scroll: 0.0, a_scroll: 0.0, video_track_h: 80.0, audio_track_h: 40.0 };
+    source.state.timeline_views.insert(active, view);
+    source.state.timeline_views.insert(invalid, filmcraft_project::SequenceView { pps: 80.0, scroll: 0.0, ..view });
+    source.state.open_sequences.push(invalid);
+    source.state.playheads.insert(invalid, Tick(42));
+    start(&mut source, &dir);
+    source.persistence.as_ref().unwrap().flush();
+    source.poll_persistence();
+    let writes = source.persistence.as_ref().unwrap().status.journals_written;
+    assert!(writes > 0);
+    let expected = source.project_view();
+    assert!(expected.sequences.is_empty());
+    assert!(!expected.open_sequences.contains(&invalid));
+    assert!(!expected.playheads.contains_key(&invalid));
+    for _ in 0..4 {
+        source.sync_persistence();
+        source.persistence.as_ref().unwrap().flush();
+        source.poll_persistence();
+    }
+    assert_eq!(source.persistence.as_ref().unwrap().status.journals_written, writes);
+    source.persistence.take().unwrap().simulate_crash();
+    let mut recovered = Session::default();
+    start(&mut recovered, &dir);
+    recovered.execute("file.recover", json!({})).unwrap();
+    assert_eq!(recovered.project_view(), expected);
+    recovered.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn recovery_respects_disabled_sequence_view_restoration() {
+    let dir = temp_dir("recovery-view-preference");
+    let mut source = demo();
+    let main = source.state.active_sequence.unwrap();
+    let other = ItemId(source.execute("file.newSequence", json!({"name":"Other"})).unwrap()["sequence"].as_u64().unwrap());
+    source.execute("sequence.open", json!({"item":other.0})).unwrap();
+    start(&mut source, &dir);
+    source.persistence.take().unwrap().simulate_crash();
+    let mut recovered = Session::default();
+    start(&mut recovered, &dir);
+    recovered.prefs.timeline.restore_open_sequences = false;
+    recovered.execute("file.recover", json!({})).unwrap();
+    assert_eq!(recovered.state.active_sequence, Some(main));
+    assert!(!recovered.state.open_sequences.contains(&other));
+    recovered.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
 }

@@ -138,7 +138,7 @@ fn request_sequence_peaks(app: &mut FilmcraftApp, item: ItemId) -> Option<Arc<Ve
         pending.lock().unwrap_or_else(|e| e.into_inner()).retain(|i| *i != pkey);
     };
     #[cfg(not(target_arch = "wasm32"))]
-    std::thread::spawn(run);
+    peak_spawn_result(app, pkey, std::thread::Builder::new().name("filmcraft-waveform".into()).spawn(run));
     #[cfg(target_arch = "wasm32")]
     run();
     have
@@ -190,13 +190,28 @@ pub(crate) fn request_peaks(app: &mut FilmcraftApp, item: ItemId, stream: usize)
     let pending = app.tl.peaks_pending.clone();
     let dur = src.info().duration;
     let run = move || {
-        let out = source_peaks(&*src, stream, dur);
-        peaks.lock().unwrap_or_else(|e| e.into_inner()).insert(pkey, Arc::new(out));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source_peaks(&*src, stream, dur)));
+        match outcome {
+            Ok(out) => {
+                peaks.lock().unwrap_or_else(|e| e.into_inner()).insert(pkey, Arc::new(out));
+            }
+            Err(_) => {
+                log::error!("Waveform worker failed; waveform can be retried.");
+            }
+        }
         pending.lock().unwrap_or_else(|e| e.into_inner()).retain(|i| *i != pkey);
     };
     #[cfg(not(target_arch = "wasm32"))]
-    std::thread::spawn(run);
+    peak_spawn_result(app, pkey, std::thread::Builder::new().name("filmcraft-waveform".into()).spawn(run));
     #[cfg(target_arch = "wasm32")]
     run();
     None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn peak_spawn_result(app: &mut FilmcraftApp, key: PeakKey, result: std::io::Result<std::thread::JoinHandle<()>>) {
+    if let Err(error) = result {
+        app.tl.peaks_pending.lock().unwrap_or_else(|e| e.into_inner()).retain(|k| *k != key);
+        app.ui.status = format!("Could not start waveform worker: {error}. Close other work and retry.");
+    }
 }

@@ -2,7 +2,10 @@
 
 OS media integration for FilmCraft (layer L5): hardware video decoding through the operating
 system's codecs, behind `filmcraft_codecs::VideoDecoder`, and hardware H.264 and H.265 (HEVC)
-encoding, behind `filmcraft_export::VideoEncoder`. It holds OS media FFI and nothing else.
+encoding, behind `filmcraft_export::VideoEncoder`. Its sole approved non-media call is Windows
+`GetCursorPos` in `cursor.rs`, used to locate OS file drops when winit supplies no pointer events.
+That read-only wrapper returns `None` on failure or other platforms; callers retain egui's pointer
+fallback. The owner approved this specific exception on 2026-10-29; other non-media FFI is excluded.
 It is the one crate of the workspace allowed to contain `unsafe`, under the rules of
 [ADR 0001](../../docs/adr/0001-platform-ffi.md) and [AGENTS.md](../../AGENTS.md) §0.3.
 

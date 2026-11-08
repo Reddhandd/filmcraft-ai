@@ -125,6 +125,44 @@ pub fn work_area_at(seq: &Sequence, layout: &Layout, pos: Pos2) -> Option<Option
     })
 }
 
+fn transition_edge(layout: &Layout, transition: &filmcraft_project::Transition, pos: Pos2) -> Option<Option<Edge>> {
+    let x0 = layout.x_of(transition.start);
+    let x1 = layout.x_of(transition.end());
+    if !pos.x.is_finite() || pos.x < x0 || pos.x > x1 {
+        return None;
+    }
+    let zone = EDGE_PX.min((x1 - x0) / 3.0);
+    Some(if pos.x - x0 <= zone {
+        Some(Edge::In)
+    } else if x1 - pos.x <= zone {
+        Some(Edge::Out)
+    } else {
+        None
+    })
+}
+
+/// Select the painted topmost bar, keep the selected bar for a drag or right click, or cycle
+/// through bars under a repeated left click. The returned edge belongs to that exact bar.
+pub fn transition_target(seq: &Sequence, layout: &Layout, pos: Pos2, selected: Option<TransitionId>, cycle: bool) -> Option<Hit> {
+    if !layout.content.contains(pos) {
+        return None;
+    }
+    let row = layout.row_at(pos.y)?;
+    if pos.y <= row.rect.min.y + 17.0 {
+        return None;
+    }
+    let track = seq.track(row.track)?;
+    let matches: Vec<_> =
+        track.transitions.iter().filter_map(|transition| transition_edge(layout, transition, pos).map(|edge| (transition.id, edge))).collect();
+    let index = match selected.and_then(|id| matches.iter().position(|(candidate, _)| *candidate == id)) {
+        Some(index) if cycle => (index + 1) % matches.len(),
+        Some(index) => index,
+        None => matches.len().checked_sub(1)?,
+    };
+    let (id, edge) = *matches.get(index)?;
+    Some(Hit::Transition { track: row.track, id, edge })
+}
+
 pub fn hit(seq: &Sequence, layout: &Layout, pos: Pos2) -> Hit {
     if layout.ruler.contains(pos) {
         if let Some(edge) = work_area_at(seq, layout, pos) {
@@ -137,21 +175,10 @@ pub fn hit(seq: &Sequence, layout: &Layout, pos: Pos2) -> Hit {
     }
     let Some(row) = layout.row_at(pos.y) else { return Hit::None };
     let Some(tr) = seq.track(row.track) else { return Hit::None };
-    for trn in &tr.transitions {
-        let x0 = layout.x_of(trn.start);
-        let x1 = layout.x_of(trn.end());
-        if pos.x >= x0 && pos.x <= x1 && pos.y > row.rect.min.y + 17.0 {
-            // the ends are edge zones, narrower on a short transition so its middle stays grabbable
-            let zone = EDGE_PX.min((x1 - x0) / 3.0);
-            let edge = if pos.x - x0 <= zone {
-                Some(Edge::In)
-            } else if x1 - pos.x <= zone {
-                Some(Edge::Out)
-            } else {
-                None
-            };
-            return Hit::Transition { track: row.track, id: trn.id, edge };
-        }
+    if pos.y > row.rect.min.y + 17.0
+        && let Some((trn, edge)) = tr.transitions.iter().rev().find_map(|transition| transition_edge(layout, transition, pos).map(|edge| (transition, edge)))
+    {
+        return Hit::Transition { track: row.track, id: trn.id, edge };
     }
     if let Some((clip, edge)) = edge_at(tr, layout, pos.x) {
         return Hit::Clip { track: row.track, clip, edge: Some(edge) };

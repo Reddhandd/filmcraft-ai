@@ -143,3 +143,27 @@ fn a_middle_button_drag_pans_whatever_the_tool() {
     assert!((scroll - 8.0).abs() < 1e-6, "the Razor tool pans with the middle button too: {scroll}");
     assert_eq!(d.clips(), before, "the middle button cuts nothing");
 }
+
+#[test]
+fn option_middle_drag_zooms_without_editing_or_seeking() {
+    let mut d = Driver::demo();
+    let (_, _, r) = d.setup();
+    d.exec("playhead.set", json!({"seconds":8}));
+    let project = d.app().session.project.clone();
+    let playhead = d.app().session.playhead();
+    let from = r.center();
+    let to = from + egui::vec2(80.0, 0.0);
+    d.send(egui::Event::ModifiersChanged(egui::Modifiers::ALT));
+    d.send(egui::Event::PointerMoved(from));
+    d.send(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Middle, pressed: true, modifiers: egui::Modifiers::ALT });
+    for k in 1..=8 {
+        d.send(egui::Event::PointerMoved(from.lerp(to, k as f32 / 8.0)));
+    }
+    assert!(d.app().ui.timeline.target_pps > 50.0);
+    d.send(egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::ALT });
+    d.send(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Middle, pressed: false, modifiers: egui::Modifiers::ALT });
+    d.frames(2);
+    assert_eq!(d.app().ui.timeline.target_pps, 50.0);
+    assert_eq!(d.app().session.playhead(), playhead);
+    assert_eq!(*d.app().session.project, *project);
+}

@@ -875,3 +875,26 @@ fn max_threads_reaches_the_export_settings() {
     assert!(settings_of(json!({"format": "mjpeg", "path": "out.mov", "maxThreads": -1})).is_err(), "a negative count is refused");
     assert!(settings_of(json!({"format": "mjpeg", "path": "out.mov", "settings": {"maxThread": 2}})).is_err(), "a misspelt setting is refused, not ignored");
 }
+
+#[test]
+fn finalizing_job_json_does_not_publish_success_before_a_result_exists() {
+    use std::sync::atomic::Ordering;
+    let job = crate::Job { id: 91, label: "Exporting".into(), progress: Default::default(), result: Default::default() };
+    job.progress.total.store(100, Ordering::Relaxed);
+    job.progress.done.store(100, Ordering::Relaxed);
+    let pending = job.to_json();
+    assert_eq!(pending["phase"], "finalizing");
+    assert_eq!(pending["status"], "Finalizing");
+    assert_eq!(pending["progress"], 1.0);
+    assert_eq!(pending["finished"], false);
+    assert!(pending["result"].is_null());
+    assert!(pending["etaSeconds"].is_null());
+    job.progress.set_phase(filmcraft_export::ProgressPhase::Finalizing);
+    job.progress.finished.store(true, Ordering::Relaxed);
+    assert_eq!(job.to_json()["finished"], false, "the result still has not been published");
+    *job.result.lock().unwrap() = Some(Err("cancelled".into()));
+    let cancelled = job.to_json();
+    assert_eq!(cancelled["finished"], true);
+    assert_eq!(cancelled["result"]["error"], "cancelled");
+    assert!(cancelled["etaSeconds"].is_null());
+}

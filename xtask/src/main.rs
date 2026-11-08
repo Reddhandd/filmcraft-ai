@@ -19,7 +19,7 @@
 //! - `i18n-report`: print the interface strings each language's catalog lacks (they show in
 //!   English). It never fails.
 //! - `ci`: fmt check, clippy -D warnings, tests (`cargo nextest run` when installed) and doctests,
-//!   the i18n report, layers, assets, wasm.
+//!   the i18n report, native Metal timeout-policy regression on macOS, layers, assets, wasm.
 
 mod ico;
 mod parity;
@@ -495,9 +495,34 @@ fn ci() -> Result<(), String> {
     let tested = tests();
     i18n_report();
     tested?;
+    native_graphics_regressions()?;
     layers()?;
     assets()?;
     wasm()
+}
+
+/// The retained third-party dependency is not a workspace member, so its native policy test
+/// needs an explicit gate. It creates only a CAMetalLayer, never a window or GPU workload.
+fn native_graphics_regressions() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().ok_or("xtask has no workspace parent")?;
+        run(Command::new(env!("CARGO")).env("CARGO_TARGET_DIR", root.join("target/metal-timeout-policy-tests")).args([
+            "test",
+            "--manifest-path",
+            "vendor/wgpu-hal/Cargo.toml",
+            "--no-default-features",
+            "--features",
+            "metal",
+            "--lib",
+            "metal::surface::filmcraft_timeout_tests::initial_configuration_and_reconfiguration_enable_native_timeout",
+            "--",
+            "--exact",
+        ]))?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    println!("native Metal timeout-policy regression: macOS only");
+    Ok(())
 }
 
 /// Lib, bin and integration tests (examples aren't linked; clippy checked them), then doctests,

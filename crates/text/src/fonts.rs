@@ -6,8 +6,10 @@
 //! [`resolve`] maps a family + style name (as stored in projects) to a face and the synthetic
 //! bold/italic needed when the family lacks that style. Unknown families fall back to Inter.
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
 use skrifa::instance::{LocationRef, Size};
@@ -111,29 +113,122 @@ impl DirectorySource {
     }
 }
 
+const MAX_DISCOVERY_FILES: usize = 8192;
+const MAX_DISCOVERY_ENTRIES: usize = 65536;
+const MAX_DISCOVERY_PATH_BYTES: usize = 8 * 1024 * 1024;
+const MAX_DISCOVERY_FACES: usize = 16384;
+const MAX_DISCOVERY_METADATA_BYTES: usize = 32 * 1024 * 1024;
+static DISCOVERY_LIMITED: AtomicBool = AtomicBool::new(false);
+/// Some system fonts were omitted because a discovery safety limit was reached.
+pub fn discovery_limited() -> bool {
+    DISCOVERY_LIMITED.load(Ordering::Relaxed)
+}
+struct ScanBudget {
+    entries: usize,
+    files: usize,
+    path_bytes: usize,
+    limited: bool,
+}
+impl Default for ScanBudget {
+    fn default() -> Self {
+        Self { entries: MAX_DISCOVERY_ENTRIES, files: MAX_DISCOVERY_FILES, path_bytes: MAX_DISCOVERY_PATH_BYTES, limited: false }
+    }
+}
+#[cfg(all(test, unix))]
 fn walk(dir: &std::path::Path, depth: u32, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
-        let Ok(file_type) = e.file_type() else { continue };
-        // Font discovery is bounded to the configured folders: never follow a symlinked folder
-        // into a loop or an unrelated tree. Symlinked font files (NixOS, home-manager, Debian
-        // alternatives) still count.
-        let is_file = if file_type.is_symlink() { std::fs::metadata(&p).is_ok_and(|m| m.is_file()) } else { file_type.is_file() };
-        if file_type.is_dir() {
+    walk_bounded(dir, depth, out, &mut ScanBudget::default());
+}
+fn walk_bounded(dir: &std::path::Path, depth: u32, out: &mut Vec<PathBuf>, budget: &mut ScanBudget) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries {
+        if budget.entries == 0 {
+            budget.limited = true;
+            return;
+        }
+        budget.entries = budget.entries.saturating_sub(1);
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        // Never follow directory symlinks. A symlink to a regular font file is allowed.
+        let is_file = if kind.is_symlink() { std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) } else { kind.is_file() };
+        if kind.is_dir() {
             if depth < 4 {
-                walk(&p, depth + 1, out);
+                walk_bounded(&path, depth.saturating_add(1), out, budget);
+                if budget.limited {
+                    return;
+                }
             }
-        } else if is_file && p.extension().and_then(OsStr::to_str).is_some_and(|x| matches!(x.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc")) {
-            out.push(p);
+        } else if is_file
+            && path
+                .extension()
+                .and_then(OsStr::to_str)
+                .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc"))
+        {
+            let bytes = path.as_os_str().as_encoded_bytes().len();
+            if budget.files == 0 || bytes > budget.path_bytes || out.try_reserve(1).is_err() {
+                budget.limited = true;
+                return;
+            }
+            budget.files = budget.files.saturating_sub(1);
+            budget.path_bytes = budget.path_bytes.saturating_sub(bytes);
+            out.push(path);
         }
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod directory_tests {
+    #[cfg(unix)]
     use super::walk;
 
+    #[test]
+    fn directory_walk_limits_entries_files_and_retained_paths() {
+        use super::{ScanBudget, walk_bounded};
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..8 {
+            std::fs::write(root.path().join(format!("{index}.ttf")), b"").unwrap();
+        }
+        for (entries, files, path_bytes, maximum) in [(2, 8, usize::MAX, 2), (20, 3, usize::MAX, 3), (20, 8, 0, 0)] {
+            let mut budget = ScanBudget { entries, files, path_bytes, limited: false };
+            let mut found = Vec::new();
+            walk_bounded(root.path(), 0, &mut found, &mut budget);
+            assert!(budget.limited);
+            assert!(found.len() <= maximum);
+        }
+    }
+
+    #[test]
+    fn discovery_omits_oversized_family_names() {
+        use super::{DirectorySource, FontSource};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("oversized.ttf");
+        let text: Vec<u8> = "x".repeat(600).encode_utf16().flat_map(u16::to_be_bytes).collect();
+        let mut font = vec![0u8; 44 + 18 + text.len()];
+        font[..4].copy_from_slice(&[0, 1, 0, 0]);
+        font[4..6].copy_from_slice(&2u16.to_be_bytes());
+        font[12..16].copy_from_slice(b"glyf");
+        font[28..32].copy_from_slice(b"name");
+        font[36..40].copy_from_slice(&44u32.to_be_bytes());
+        font[40..44].copy_from_slice(&(18u32 + text.len() as u32).to_be_bytes());
+        let name = &mut font[44..];
+        name[2..4].copy_from_slice(&1u16.to_be_bytes());
+        name[4..6].copy_from_slice(&18u16.to_be_bytes());
+        for (offset, value) in [(6, 3u16), (8, 1), (10, 0x409), (12, 16), (14, text.len() as u16)] {
+            name[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+        }
+        name[18..].copy_from_slice(&text);
+        std::fs::write(path, font).unwrap();
+        assert!(DirectorySource { dirs: vec![root.path().to_owned()] }.faces().is_empty());
+        assert!(super::discovery_limited());
+    }
+
+    #[cfg(unix)]
     #[test]
     fn directory_source_does_not_follow_symlinked_font_trees() {
         use std::os::unix::fs::symlink;
@@ -157,16 +252,41 @@ mod directory_tests {
 
 impl FontSource for DirectorySource {
     fn faces(&self) -> Vec<FaceInfo> {
+        let mut budget = ScanBudget::default();
         let mut files = Vec::new();
-        for d in &self.dirs {
-            walk(d, 0, &mut files);
+        for directory in self.dirs.iter().take(64) {
+            walk_bounded(directory, 0, &mut files, &mut budget);
+            if budget.limited {
+                break;
+            }
+        }
+        if self.dirs.len() > 64 || budget.limited {
+            DISCOVERY_LIMITED.store(true, Ordering::Relaxed);
         }
         files.sort();
         let mut out = Vec::new();
-        for f in files {
-            let Ok(mut file) = std::fs::File::open(&f) else { continue };
-            for n in read_faces(&mut file) {
-                out.push(info_from(n, FaceData::File(f.clone()), "system"));
+        let mut remaining = MAX_DISCOVERY_METADATA_BYTES;
+        for path in files {
+            let Ok(mut file) = std::fs::File::open(&path) else {
+                continue;
+            };
+            for names in read_faces(&mut file) {
+                if names.family.is_empty() || names.family.len() > 512 || names.style.len() > 256 {
+                    DISCOVERY_LIMITED.store(true, Ordering::Relaxed);
+                    continue;
+                }
+                let bytes = names
+                    .family
+                    .capacity()
+                    .saturating_add(names.style.capacity())
+                    .saturating_add(path.as_os_str().as_encoded_bytes().len())
+                    .saturating_add(std::mem::size_of::<FaceInfo>());
+                if out.len() >= MAX_DISCOVERY_FACES || bytes > remaining || out.try_reserve(1).is_err() {
+                    DISCOVERY_LIMITED.store(true, Ordering::Relaxed);
+                    return out;
+                }
+                remaining = remaining.saturating_sub(bytes);
+                out.push(info_from(names, FaceData::File(path.clone()), "system"));
             }
         }
         out
@@ -344,15 +464,22 @@ fn push(db: &mut Db, info: FaceInfo) -> FaceId {
 pub fn add_source(src: &dyn FontSource) -> usize {
     let faces = src.faces();
     let mut d = db().write().unwrap_or_else(PoisonError::into_inner);
-    let mut n = 0;
-    for f in faces {
-        let dup = d.faces.iter().any(|g| g.info.family.eq_ignore_ascii_case(&f.family) && g.info.style.eq_ignore_ascii_case(&f.style));
-        if !dup {
-            push(&mut d, f);
-            n += 1;
+    let mut known = HashSet::new();
+    if known.try_reserve(d.faces.len().saturating_add(faces.len())).is_err() {
+        DISCOVERY_LIMITED.store(true, Ordering::Relaxed);
+        return 0;
+    }
+    for face in &d.faces {
+        known.insert((face.info.family.to_ascii_lowercase(), face.info.style.to_ascii_lowercase()));
+    }
+    let mut added = 0usize;
+    for face in faces {
+        if known.insert((face.family.to_ascii_lowercase(), face.style.to_ascii_lowercase())) {
+            push(&mut d, face);
+            added = added.saturating_add(1);
         }
     }
-    n
+    added
 }
 
 /// Register a font from memory (e.g. a font file the user picked on the web). Returns its faces.
@@ -447,6 +574,18 @@ fn style_wants(style: &str) -> (u16, bool) {
         400
     };
     (w, italic)
+}
+
+/// Read catalog metadata without touching a face's permanent byte/shaper caches.
+/// Previews use the nearest regular style and own their temporary font data.
+pub(crate) fn preview_info(family: &str) -> Option<FaceInfo> {
+    let database = db().read().unwrap_or_else(PoisonError::into_inner);
+    database
+        .faces
+        .iter()
+        .filter(|face| face.info.family.eq_ignore_ascii_case(family))
+        .min_by_key(|face| u32::from(face.info.weight.abs_diff(400)) + if face.info.italic { 1000 } else { 0 })
+        .map(|face| face.info.clone())
 }
 
 /// Resolve a family + style name. Family matching is case-insensitive; a style that the family
@@ -633,5 +772,71 @@ mod tests {
         assert!(f.data().is_some());
         assert!(f.bytes.get().is_some());
         let _ = std::fs::remove_file(&path);
+    }
+    #[test]
+    fn picker_preview_does_not_keep_file_bytes_or_poison_failed_reads() {
+        struct Source(FaceInfo);
+        impl FontSource for Source {
+            fn faces(&self) -> Vec<FaceInfo> {
+                vec![self.0.clone()]
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("preview.ttf");
+        std::fs::write(&path, INTER_REGULAR).unwrap();
+        let family = format!("FilmCraft Preview Cache Test {}", std::process::id());
+        add_source(&Source(FaceInfo {
+            family: family.clone(),
+            style: "Regular".into(),
+            weight: 400,
+            italic: false,
+            index: 0,
+            data: FaceData::File(path.clone()),
+            origin: "test",
+        }));
+        let face = all_faces().into_iter().find(|face| face.info.family == family).unwrap();
+        assert!(face.bytes.get().is_none());
+        assert!(face.shaper.get().is_none());
+        let mask = crate::preview::family(&family, 16.0, 240, 24).unwrap();
+        assert!(mask.a.iter().any(|value| *value > 0.0));
+        assert!(face.bytes.get().is_none());
+        assert!(face.shaper.get().is_none());
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(crate::preview::family(&family, 16.0, 240, 24).unwrap_err(), crate::preview::PreviewError::UnreadableFont);
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(crate::preview::family(&family, 16.0, 240, 24).unwrap_err(), crate::preview::PreviewError::UnreadableFont);
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, INTER_REGULAR).unwrap();
+        assert!(crate::preview::family(&family, 16.0, 240, 24).is_ok());
+        assert!(face.bytes.get().is_none());
+        assert!(face.shaper.get().is_none());
+    }
+    #[test]
+    fn source_deduplication_preserves_first_face_identity() {
+        struct Source(Vec<FaceInfo>);
+        impl FontSource for Source {
+            fn faces(&self) -> Vec<FaceInfo> {
+                self.0.clone()
+            }
+        }
+        let family = format!("FilmCraft Duplicate Test {}", std::process::id());
+        let original = FaceInfo {
+            family: family.clone(),
+            style: "Regular".into(),
+            weight: 400,
+            italic: false,
+            index: 0,
+            data: FaceData::Static(INTER_REGULAR),
+            origin: "test",
+        };
+        let mut duplicate = original.clone();
+        duplicate.family = family.to_ascii_lowercase();
+        duplicate.style = "REGULAR".into();
+        duplicate.data = FaceData::Static(JETBRAINS_MONO_REGULAR);
+        assert_eq!(add_source(&Source(vec![original, duplicate.clone()])), 1);
+        let first = all_faces().into_iter().find(|face| face.info.family == family).unwrap();
+        assert_eq!(add_source(&Source(vec![duplicate])), 0);
+        assert_eq!(resolve(&family, "Regular").face, first.id);
+        assert_eq!(first.info.style, "Regular");
     }
 }

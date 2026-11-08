@@ -453,8 +453,8 @@ fn gpu_hook_scenarios() {
     // at most one panic per pooled renderer (4): none is used again after it panicked
     assert!(PANICS.load(std::sync::atomic::Ordering::SeqCst) <= 4, "renderer reused after a panic: {}", PANICS.load(std::sync::atomic::Ordering::SeqCst));
 
-    // 5. A frame the planner hands back as one CPU image (an adjustment layer over the clip from
-    //    frame 12) is rendered by the CPU without taking a pooled renderer: it counts as a
+    // 5. A playback adjustment composite over the clip from frame 12 still exports on the CPU
+    //    without taking a pooled renderer: it counts as a
     //    fallback, and the renderer's picture reaches only the frames before it.
     crate::reset_frame_renderers_for_tests();
     crate::register_frame_renderer(|| Some(Box::new(FakeRenderer) as Box<dyn FrameRenderer>));

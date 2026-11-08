@@ -18,12 +18,22 @@ pub const GITHUB: &str = "https://github.com/storytold/filmcraft";
 pub const ISSUES: &str = "https://github.com/storytold/filmcraft/issues";
 
 /// (command id, label, url) for every link, in menu order.
+#[cfg(not(feature = "independent-alpha"))]
 pub const ALL: [(&str, &str, &str); 5] = [
     ("help.discord", "Join the ArtCraft Discord…", DISCORD),
     ("help.website", "ArtCraft Website", WEBSITE),
     ("help.appPage", "FilmCraft on getartcraft.com", APP_PAGE),
     ("help.github", "FilmCraft on GitHub", GITHUB),
     ("help.reportIssue", "Report an Issue…", ISSUES),
+];
+
+#[cfg(feature = "independent-alpha")]
+pub const ALL: [(&str, &str, &str); 5] = [
+    ("help.discord", "Upstream FilmCraft community…", DISCORD),
+    ("help.website", "Upstream ArtCraft website", WEBSITE),
+    ("help.appPage", "Upstream FilmCraft project", APP_PAGE),
+    ("help.github", "Upstream FilmCraft source", GITHUB),
+    ("help.reportIssue", "Upstream issue tracker…", ISSUES),
 ];
 
 /// A link the web browser couldn't open (`ui.failedLink`): the address and the reason.
@@ -49,6 +59,8 @@ pub fn menu_hint(command: &str) -> Option<String> {
         match command {
             "help.revealLogFiles" => tl!("Saves this session's log and shows it in your file manager."),
             "help.systemCompatibilityReport" => tl!("Shows a report on this computer."),
+            "diagnostics.toggle" => tl!("Turn local rolling diagnostics on or off; monitoring is opt-in."),
+            "diagnostics.capture" => tl!("Save a local diagnostic report from the recent rolling buffer."),
             "app.about" => tl!("Shows the version, community links and credits in a FilmCraft window."),
             "app.checkForUpdates" => tl!("Looks for a newer FilmCraft release and offers to update."),
             _ => return None,

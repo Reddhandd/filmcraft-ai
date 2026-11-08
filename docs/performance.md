@@ -4,6 +4,30 @@
 and `.md` (options and sections: [testing.md](testing.md) §5). Agents read live counters with
 `perf.stats` ([control-protocol.md](control-protocol.md)).
 
+Qualification runs use `cargo xtask bench --required`: failed child processes or exports fail the
+run, unavailable fixtures and empty sections are explicit skipped/incomplete coverage, and required
+runs reject either state. JSON includes section/fixture coverage and requested backends.
+`--hw auto|off` controls decoding, `--encode auto|off` controls encoding, and
+`--gpu-rendering auto|off` controls compositing independently. `--cpu` requires all three off;
+conflicting explicit settings are errors. Export rows retain actual hardware/GPU frame counters.
+
+`--sections project --only persistent-undo` compares ordinary save/open with a save retaining
+twenty added history states, reporting sidecar size and synchronous save latency. A successful
+project-file save with a missing undo sidecar is an explicit failed benchmark row. Measurements
+must state build profile and machine load; they do not establish a new responsiveness guarantee.
+
+2026-10-29 harness qualification on Apple M1, 8 cores/8 GB, Darwin 27: development profile
+(editor optimization level 1), with FilmCraft builds/tests finished before measurement. A quick
+1080p H.264/AAC CPU export encoded 71 frames in 6.66 s, with hardware/GPU frame counters both zero
+and 968 MB peak RSS. One-minute load changed from 3.05 before fixture generation to 17.01 after
+export. This single run qualifies the controls and reporting; it is not a release throughput baseline.
+On five sequences/5,000 clips, median ordinary save/open was 24.9/19.5 ms over three runs. Adding
+twenty history states (26 retained entries total) raised synchronous save to 337.8 ms and wrote an
+85.3 MB undo sidecar (load 17.01, 348 MB peak section RSS). Measure release builds and larger histories
+before choosing bounded background persistence work. Required empty/unavailable-fixture and invalid
+section cases all returned nonzero with explicit status. Ignored local reports:
+`target/consolidation-20261029/bench/qualification.json` and `bench-*.json`.
+
 ## Interactive builds and redraw work
 
 For interactive editing, build with `cargo build --release -p filmcraft --features whisper` and

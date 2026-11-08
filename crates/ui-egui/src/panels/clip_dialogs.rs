@@ -87,6 +87,8 @@ fn hold_on() -> [(&'static str, &'static str); 5] {
 
 /// Menu / shortcut entry points without params open a dialog. Returns None for other ids.
 pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
+    // Canonical currently has one project per session; Close All needs the same dirty-project guard.
+    let id = if id == "file.closeAllProjects" { "file.closeProject" } else { id };
     let empty = params.as_object().is_none_or(|m| m.is_empty());
     if !empty {
         return None;
@@ -112,6 +114,15 @@ pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<
 /// changes it is cancelled and Save / Don't Save / Cancel is asked first, as in Premiere (#266).
 /// Returns whether the close must be cancelled.
 pub fn intercept_quit(app: &mut FilmcraftApp) -> bool {
+    if !app.quit_confirmed && crate::console::sessions::has_unsaved_memory(app) {
+        app.ui.status = crate::console::sessions::protect_memory(app);
+        return true;
+    }
+
+    if let Err(error) = crate::console::assistants::flush(app) {
+        app.ui.status = error;
+        return true;
+    }
     if app.quit_confirmed || !app.session.is_dirty() {
         return false;
     }

@@ -50,6 +50,38 @@ const OP_MIRROR: u32 = 28u;
 const OP_OFFSET: u32 = 29u;
 const OP_VIDEO_LIMITER: u32 = 30u;
 const OP_LUMETRI: u32 = 31u;
+const OP_NOISE: u32 = 32u;
+
+// Exact wrapping u64 arithmetic as low/high u32 limbs; WGSL has no portable u64.
+fn noise_mul_hi(a: u32, b: u32) -> u32 {
+    let a0 = a & 65535u;
+    let a1 = a >> 16u;
+    let b0 = b & 65535u;
+    let b1 = b >> 16u;
+    let w0 = a0 * b0;
+    let t = a1 * b0 + (w0 >> 16u);
+    let w1 = (t & 65535u) + a0 * b1;
+    return a1 * b1 + (t >> 16u) + (w1 >> 16u);
+}
+fn noise_mul(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
+    return vec2(a.x * b.x, noise_mul_hi(a.x, b.x) + a.y * b.x + a.x * b.y);
+}
+fn noise_add(a: vec2<u32>, b: u32) -> vec2<u32> {
+    let lo = a.x + b;
+    return vec2(lo, a.y + select(0u, 1u, lo < a.x));
+}
+fn noise_shift(a: vec2<u32>, n: u32) -> vec2<u32> {
+    return vec2((a.x >> n) | (a.y << (32u - n)), a.y >> n);
+}
+fn noise_hash(p: vec2<i32>, seed: vec2<u32>) -> f32 {
+    var h = noise_mul(vec2(u32(p.x), 0u), vec2(0x7f4a7c15u, 0x9e3779b9u))
+        ^ noise_mul(vec2(u32(p.y), 0u), vec2(0x27d4eb4fu, 0xc2b2ae3du))
+        ^ noise_mul(seed, vec2(0x9e3779f9u, 0x165667b1u));
+    h = h ^ noise_shift(h, 31u);
+    h = noise_mul(h, vec2(0x1ce4e5b9u, 0xbf58476du));
+    h = h ^ noise_shift(h, 29u);
+    return f32(h.y >> 8u) / 16777216.0;
+}
 
 fn size() -> vec2<i32> {
     return vec2<i32>(i32(u.i0.y), i32(u.i0.z));
@@ -462,11 +494,13 @@ fn lumetri_op(c: vec3<f32>, p: vec2<i32>) -> vec3<f32> {
     let hl_k = u.p1.z;
     let l = luma709(v);
     let ws_val = clamp(1.0 - l, 0.0, 1.0);
-    let ws = ws_val * ws_val * ws_val;
+    // Match the CPU black-anchored shadow toe in the encoded grading signal.
+    let toe = clamp(l / 0.05, 0.0, 1.0);
+    let ws = ws_val * ws_val * ws_val * (toe * toe * (3.0 - 2.0 * toe));
     let whl_val = clamp(l, 0.0, 1.0);
     let whl = whl_val * whl_val * whl_val;
     let nl = max(l + sh_k * ws + hl_k * whl, 0.0);
-    if l > 1e-5 {
+    if l > 0.0 {
         let k = nl / l;
         v = v * k;
     }
@@ -704,6 +738,20 @@ fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
             }
             let res = vec3(enc_to_linear_limiter(out_enc.x), enc_to_linear_limiter(out_enc.y), enc_to_linear_limiter(out_enc.z));
             return vec4(res * a, a);
+        }
+        case OP_NOISE: {
+            let o = ld(p);
+            if o.a <= 0.0 || u.p0.x <= 0.0 { return o; }
+            let grain_p = vec2<i32>(vec2<f32>(p) / u.p0.y);
+            let seed = u.i1.xy;
+            let n0 = noise_hash(grain_p, seed) - 0.5;
+            var ns = vec3(n0);
+            if u.i1.z != 0u {
+                ns = vec3(n0, noise_hash(grain_p, noise_add(seed, 7777u)) - 0.5, noise_hash(grain_p, noise_add(seed, 99991u)) - 0.5);
+            }
+            var v = enc(o.rgb / o.a) + ns * u.p0.x;
+            if u.i1.w != 0u { v = clamp(v, vec3(0.0), vec3(1.0)); }
+            return vec4(dec(v) * o.a, o.a);
         }
         case OP_LUMETRI: {
             let o = ld(p);

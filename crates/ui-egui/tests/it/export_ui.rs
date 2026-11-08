@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Sender, channel};
 
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use filmcraft_engine::Session;
 use filmcraft_ui_egui::FilmcraftApp;
 use filmcraft_ui_egui::control::ControlRequest;
@@ -211,11 +212,21 @@ fn the_status_bar_and_the_queue_show_the_time_left() {
     d.frames(4);
     // the status bar says it next to the percentage, and agents read it from the same label
     let label = d.ok("ui.elements", json!({"prefix": "status.job.progress"}))[0]["label"].as_str().unwrap().to_string();
-    assert_eq!(label, "25% · 15 s left");
+    assert_eq!(label, "Exporting… 25% · 15 s left");
     // the queue item has it too
     let item = d.queue().into_iter().next().unwrap();
     assert!((item["etaSeconds"].as_f64().unwrap() - 15.0).abs() < 0.5, "{item}");
     assert_eq!(item["status"], "encoding");
+    d.app().session.jobs.iter().find(|j| j.id == 900).unwrap().progress.done.store(1000, Ordering::Relaxed);
+    d.frames(3);
+    let label = d.ok("ui.elements", json!({"prefix": "status.job.progress"}))[0]["label"].as_str().unwrap().to_string();
+    assert_eq!(label, "Finalizing…");
+    assert!(d.has("status.job.cancel"));
+    let item = d.queue().into_iter().next().unwrap();
+    assert_eq!(item["status"], "encoding");
+    assert_eq!(item["phase"], "finalizing");
+    assert!(item["etaSeconds"].is_null());
+    assert!(d.harness.query_by_label("Finalizing…").is_some());
     d.snapshot("export-eta");
 }
 

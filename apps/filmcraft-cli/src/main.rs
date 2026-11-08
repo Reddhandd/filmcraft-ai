@@ -106,6 +106,10 @@ OPTIONS
   --demo                        open the built-in demo project (headless)
   --save                        save the project back to --project when done
   --save-as <p.fcproj>          save the project to this path when done
+  --controller-console          for mcp: native in-app console commands (requires --bridge or --provider-profile)
+  --provider-profile <PATH>      stable private Desktop connection profile for --controller-console
+  --controller-read-only        for mcp: expose inspection, request plans and frame preview
+  --controller-edit             for mcp: expose bounded preview/commit editing tools
   --bridge <127.0.0.1:PORT>     send commands to the running app (`filmcraft --control PORT`)
   --data-dir <dir>              FilmCraft data directory for user export presets (headless;
                                 default: the app's data directory)
@@ -512,17 +516,75 @@ async fn cli() {
             diag(format_args!("rendered {}x{} in {:.1} ms → {out}", img.w, img.h, dt.as_secs_f64() * 1000.0));
         }
         "mcp" => {
-            if let Some(opt) = a.unknown_opt(&["--bridge", "--project", "--demo", "--data-dir"]) {
+            if let Some(opt) = a.unknown_opt(&[
+                "--bridge",
+                "--provider-profile",
+                "--project",
+                "--demo",
+                "--data-dir",
+                "--controller-read-only",
+                "--controller-edit",
+                "--controller-console",
+            ]) {
                 usage(format!("unknown mcp option `{opt}`"));
             }
-            let server = match a.opt("--bridge") {
-                Some(addr) => filmcraft_automation::FilmcraftMcp::bridge(addr).unwrap_or_else(|e| usage(e)),
-                None => match Backend::open(&a) {
-                    Backend::Local(s) => filmcraft_automation::FilmcraftMcp::headless(*s),
-                    Backend::Bridge(_) => usage("mcp: use --bridge ADDR to drive a running app"),
-                },
+            if ["--controller-read-only", "--controller-edit", "--controller-console"].iter().filter(|flag| a.flag(flag)).count() > 1 {
+                usage("mcp: choose only one controller profile");
+            }
+            if a.flag("--provider-profile") && (a.positionals.len() != 1 || std::env::args_os().any(|argument| argument.to_str().is_none())) {
+                usage("Desktop profile arguments require valid Unicode and no extra positionals");
+            }
+            if a.flag("--provider-profile")
+                && (!a.flag("--controller-console") || ["--bridge", "--project", "--demo", "--data-dir"].iter().any(|option| a.flag(option)))
+            {
+                usage("mcp --provider-profile requires only --controller-console; do not mix it with --bridge or headless options");
+            }
+            let result = if a.flag("--controller-console") {
+                let server = if a.flag("--provider-profile") {
+                    let path = std::path::PathBuf::from(
+                        a.opt("--provider-profile")
+                            .filter(|path| !path.is_empty())
+                            .unwrap_or_else(|| usage("--provider-profile requires a private profile path")),
+                    );
+                    let client = tokio::task::spawn_blocking(move || filmcraft_automation::BridgeClient::from_provider_profile(&path))
+                        .await
+                        .unwrap_or_else(|_| usage("Desktop profile worker failed safely"))
+                        .unwrap_or_else(|error| usage(error));
+                    filmcraft_automation::FilmcraftConsoleMcp::with_client(client)
+                } else {
+                    let addr = a.opt("--bridge").unwrap_or_else(|| usage("mcp --controller-console requires --bridge ADDR or --provider-profile PATH"));
+                    filmcraft_automation::FilmcraftConsoleMcp::bridge(addr).unwrap_or_else(|error| usage(error))
+                };
+                server.serve_stdio().await
+            } else if a.flag("--controller-edit") {
+                let server = match a.opt("--bridge") {
+                    Some(addr) => filmcraft_automation::FilmcraftMarkerControllerMcp::bridge(addr).unwrap_or_else(|e| usage(e)),
+                    None => match Backend::open(&a) {
+                        Backend::Local(s) => filmcraft_automation::FilmcraftMarkerControllerMcp::headless(*s),
+                        Backend::Bridge(_) => usage("mcp: use --bridge ADDR"),
+                    },
+                };
+                server.serve_stdio().await
+            } else if a.flag("--controller-read-only") {
+                let server = match a.opt("--bridge") {
+                    Some(addr) => filmcraft_automation::FilmcraftControllerMcp::bridge(addr).unwrap_or_else(|e| usage(e)),
+                    None => match Backend::open(&a) {
+                        Backend::Local(s) => filmcraft_automation::FilmcraftControllerMcp::headless(*s),
+                        Backend::Bridge(_) => usage("mcp: use --bridge ADDR"),
+                    },
+                };
+                server.serve_stdio().await
+            } else {
+                let server = match a.opt("--bridge") {
+                    Some(addr) => filmcraft_automation::FilmcraftMcp::bridge(addr).unwrap_or_else(|e| usage(e)),
+                    None => match Backend::open(&a) {
+                        Backend::Local(s) => filmcraft_automation::FilmcraftMcp::headless(*s),
+                        Backend::Bridge(_) => usage("mcp: use --bridge ADDR"),
+                    },
+                };
+                server.serve_stdio().await
             };
-            if let Err(e) = server.serve_stdio().await {
+            if let Err(e) = result {
                 fail(format!("mcp: {e}"));
             }
         }

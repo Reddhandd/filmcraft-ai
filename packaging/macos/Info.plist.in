@@ -42,10 +42,10 @@
   <true/>
   <key>NSRequiresAquaSystemAppearance</key>
   <false/>
-  <!-- Voice-over recording (timeline track header ▸ Voice-over Record) reads the microphone.
+  <!-- Voice-over recording and the command console's Voice On read the microphone.
        Without this string macOS never asks and the app gets no input. -->
   <key>NSMicrophoneUsageDescription</key>
-  <string>FilmCraft uses the microphone to record voice-over onto the timeline.</string>
+  <string>FilmCraft uses the microphone for timeline voice-over recording and, when you turn Voice On, spoken conversation with your connected assistant.</string>
   <key>NSHumanReadableCopyright</key>
   <string>Copyright © the FilmCraft authors. MIT OR Apache-2.0.</string>
 

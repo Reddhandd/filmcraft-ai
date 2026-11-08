@@ -54,6 +54,18 @@ pub use atomic::{atomic_write, atomic_write_new};
 /// The `format` tag written in every envelope.
 pub const FORMAT_ID: &str = "filmcraft.project";
 
+/// Maximum serialized project size accepted by file, recovery and undo-history readers.
+/// Check before reading or parsing untrusted project bytes.
+pub const MAX_PROJECT_BYTES: usize = 256 * 1024 * 1024;
+
+/// Refuse project input or encoded output that would exceed the supported file size.
+pub fn check_project_size(len: usize) -> Result<(), FormatError> {
+    if len > MAX_PROJECT_BYTES {
+        return Err(FormatError::Corrupt(format!("project file exceeds the {MAX_PROJECT_BYTES} byte size limit")));
+    }
+    Ok(())
+}
+
 /// A migration upgrades a whole document from schema `n` to `n + 1`.
 pub type Migration = fn(Value) -> Result<Value, String>;
 
@@ -198,6 +210,7 @@ fn probe_version(p: &Probe) -> Result<u32, FormatError> {
 
 /// Read a project file (any supported schema).
 pub fn decode(bytes: &[u8]) -> Result<Loaded, FormatError> {
+    check_project_size(bytes.len())?;
     let probe: Probe = serde_json::from_slice(bytes)
         .map_err(|e| if e.is_syntax() || e.is_eof() { FormatError::Corrupt(e.to_string()) } else { FormatError::NotAProject(e.to_string()) })?;
     let found = probe_version(&probe)?;
@@ -213,8 +226,8 @@ pub fn decode(bytes: &[u8]) -> Result<Loaded, FormatError> {
     validate_loaded(env.loaded(found))
 }
 
-/// Refuse only values that would overflow or exhaust memory later (`Sequence::check_bounds`);
-/// structural rules such as overlaps are left to the editor, so projects that open today still open.
+/// Refuse unsafe values (`Sequence::check_bounds`) and ambiguous identities. Other structural
+/// rules such as overlaps are left to the editor, so older editable projects still open.
 fn validate_loaded(mut loaded: Loaded) -> Result<Loaded, FormatError> {
     // Graphic layers written before they carried a uid get a stable identity now, before any
     // undo history exists. The field is optional in the schema, so this is not a schema upgrade.
@@ -263,6 +276,7 @@ fn validate_loaded(mut loaded: Loaded) -> Result<Loaded, FormatError> {
             sequence.check_bounds().map_err(|e| FormatError::Corrupt(format!("sequence `{}`: {e}", item.name)))?;
         }
     }
+    loaded.project.check_identities().map_err(FormatError::Corrupt)?;
     // Every new id is `next_id`, read from the file as is. One that lags behind the ids in it (an
     // older build, a hand edit) would hand out an id in use, and the new item replace the old (#2809).
     let project = &mut loaded.project;
@@ -607,5 +621,56 @@ mod tests {
         assert!(matches!(migrate_with(table, serde_json::json!({}), 5), Err(FormatError::TooNew { found: 5, supported: 4 })));
         let e = migrate_with(&[a, fail], serde_json::json!({}), 1).unwrap_err();
         assert!(matches!(e, FormatError::Migration { from: 2, .. }), "{e}");
+    }
+
+    #[test]
+    fn project_size_limit_is_checked_without_allocating_the_limit() {
+        assert!(check_project_size(MAX_PROJECT_BYTES).is_ok());
+        let error = check_project_size(MAX_PROJECT_BYTES + 1).unwrap_err();
+        assert!(matches!(error, FormatError::Corrupt(_)));
+        assert!(error.to_string().contains("size limit"));
+    }
+
+    #[test]
+    fn ambiguous_sequence_identities_are_rejected_in_current_and_migrated_files() {
+        use filmcraft_project::{ClipId, ItemKind, Label, SequenceSettings, TrackKind};
+        use filmcraft_time::{FrameRate, Tick, TimeRange};
+        let rate = FrameRate::FPS_24;
+        let mut valid = Project::new("Identity validation");
+        let sequence = valid.new_sequence("Main", SequenceSettings::default(), 1, 1, None);
+        let layer = valid.add_item("Layer", Label::Iris, ItemKind::AdjustmentLayer { width: 1920, height: 1080, rate, duration: rate.tick_of(48) }, None);
+        let clip = valid.make_track_item(layer, TrackKind::Video, Tick::ZERO, TimeRange::new(Tick::ZERO, rate.tick_of(24)), rate).unwrap();
+        valid.sequence_mut(sequence).unwrap().video_tracks[0].items.push(clip.clone());
+        for tracks in [false, true] {
+            let mut damaged = valid.clone();
+            let q = damaged.sequence_mut(sequence).unwrap();
+            if tracks {
+                q.audio_tracks[0].id = q.video_tracks[0].id;
+            } else {
+                q.audio_tracks[0].items.push(clip.clone());
+            }
+            for schema in [1, SCHEMA_VERSION] {
+                let bytes = if schema == 1 {
+                    let mut value = serde_json::to_value(&damaged).unwrap();
+                    value["version"] = Value::from(1);
+                    serde_json::to_vec(&value).unwrap()
+                } else {
+                    encode(&damaged, false)
+                };
+                let error = decode(&bytes).unwrap_err();
+                let expected = if tracks { "duplicate track id" } else { "duplicate clip id" };
+                assert!(matches!(error, FormatError::Corrupt(_)), "{error}");
+                assert!(error.to_string().contains(expected), "{error}");
+                assert!(error.to_string().contains("sequence `Main`"), "{error}");
+            }
+        }
+        // Distinct copies and the sequence-copy command's preserved internal identities are valid.
+        let mut copy = clip;
+        copy.id = ClipId(valid.alloc_id());
+        copy.start += copy.duration;
+        valid.sequence_mut(sequence).unwrap().video_tracks[0].items.push(copy);
+        let source = valid.item(sequence).unwrap().clone();
+        valid.add_item("Main Copy", source.label, source.kind, None);
+        assert!(decode(&encode(&valid, false)).is_ok());
     }
 }

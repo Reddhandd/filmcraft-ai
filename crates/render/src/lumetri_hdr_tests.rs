@@ -181,3 +181,79 @@ fn hsl_refine_blur_softens_the_key() {
     let speck = img.get(3, 3);
     assert!(speck[0] > speck[1], "speckle left alone after denoise: {speck:?}");
 }
+
+/// A negative black endpoint can straddle zero luma with slightly unequal channels. The
+/// shadow lift must approach black continuously instead of amplifying that residue at 1e-5.
+#[test]
+fn negative_black_endpoint_has_no_colored_shadow_step() {
+    let e = lumetri(&[
+        ("exposure", F(-0.65)),
+        ("contrast", F(40.0)),
+        ("highlights", F(-95.0)),
+        ("shadows", F(14.0)),
+        ("whites", F(-40.0)),
+        ("blacks", F(-12.0)),
+        ("temperature", F(-6.0)),
+        ("tint", F(3.0)),
+        ("saturation", F(75.0)),
+        ("creative_on", ParamValue::Bool(false)),
+        ("curves_on", ParamValue::Bool(false)),
+        ("vignette_on", ParamValue::Bool(false)),
+    ]);
+    let mut source = Image::new(2048, 3);
+    for y in 0..3 {
+        for x in 0..2048 {
+            let base = x as f32 * (0.01 / 2047.0);
+            let jitter = [0.0, 0.00001, 0.0001][y];
+            source.px[(y * 2048 + x) * 4..][..4].copy_from_slice(&[(base + jitter).max(0.0), base, (base - jitter).max(0.0), 1.0]);
+        }
+    }
+    let context = cx(WorkingSpace::Rec709);
+    let mut reference = source.clone();
+    apply(&mut reference, &e, &context);
+    let mut planned = source;
+    crate::gpufx::FxOp::eval(&e, &context, 2048, 3).unwrap().apply(&mut planned);
+    for (label, image) in [("reference", &reference), ("planned", &planned)] {
+        assert!(image.px.iter().all(|v| v.is_finite()), "{label}");
+        for y in 0..3 {
+            for x in 1..2048 {
+                let a = image.get(x - 1, y);
+                let b = image.get(x, y);
+                for k in 0..3 {
+                    assert!((a[k] - b[k]).abs() < 0.01, "{label}: colored step at {x},{y}: {a:?} -> {b:?}");
+                }
+            }
+        }
+    }
+    for (a, b) in reference.px.iter().zip(&planned.px) {
+        assert!((a - b).abs() < 1e-5, "reference/planned mismatch: {a} vs {b}");
+    }
+}
+
+#[test]
+fn shadow_toe_preserves_black_and_the_existing_outer_response() {
+    use crate::gpufx::black_anchored_shadow_weight as weight;
+    for l in [-10.0f32, -0.01, 0.0] {
+        assert_eq!(weight(l), 0.0);
+    }
+    for l in [0.05f32, 0.1, 0.5, 1.0, 4.0] {
+        assert_eq!(weight(l), (1.0 - l).clamp(0.0, 1.0).powi(3));
+    }
+    // The gain contribution weight/l approaches zero, avoiding a hidden new division floor.
+    assert!(weight(1e-7) / 1e-7 < 0.001);
+    assert!((weight(0.05 - 1e-6) - weight(0.05 + 1e-6)).abs() < 1e-5);
+}
+
+#[test]
+fn lifted_hdr_shadows_remain_finite_and_black_anchored() {
+    for working in [WorkingSpace::Rec2100Pq, WorkingSpace::Rec2100Hlg] {
+        for shadows in [-100.0, 14.0, 100.0] {
+            let e = lumetri(&[("shadows", F(shadows))]);
+            let levels = [0.0, 0.00001, 0.001, 1.0, 203.0, 1000.0, 4000.0];
+            let got = grade(working, &levels, &e);
+            assert!(got.iter().all(|v| v.is_finite() && *v >= 0.0), "{working:?}, {shadows}: {got:?}");
+            assert!(got[0] < 0.001, "black lifted: {working:?}, {shadows}: {got:?}");
+            assert!(got[1] < 0.1, "near-black flash: {working:?}, {shadows}: {got:?}");
+        }
+    }
+}

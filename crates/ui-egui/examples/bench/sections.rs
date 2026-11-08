@@ -500,16 +500,17 @@ pub fn export(o: &Opts) -> Vec<Value> {
             filmcraft_export::reset_export_lock_wait();
             filmcraft_gpu::export_renderer::timing::reset();
             let (t0, c0) = (Instant::now(), cpu_now());
-            // `--hw auto`: the hardware encoder too (NVENC H.264 on Windows); `--hw off`: ours
-            let hardware = if o.hw == "off" { "off" } else { "auto" };
-            let r = s.execute("file.exportMedia", json!({"path": out.to_string_lossy(), "format": format, "hardwareEncoding": hardware, "gpuRendering": if o.hw == "off" { "off" } else { "auto" }, "wait": true}));
+            // Decode, encode and compositor choices are independent; --cpu disables all three.
+            let r = s.execute("file.exportMedia", json!({"path": out.to_string_lossy(), "format": format, "hardwareEncoding": o.encode, "gpuRendering": if o.gpu { "auto" } else { "off" }, "wait": true}));
             let dt = t0.elapsed().as_secs_f64();
             if let Err(e) = r {
                 eprintln!("export {format}: {e}");
+                rows.push(json!({"scene": id, "error": e.to_string()}));
                 break;
             }
             if let Some(e) = s.jobs.last().and_then(|j| j.progress.error.lock().ok().and_then(|g| g.clone())) {
                 eprintln!("export {format}: {e}");
+                rows.push(json!({"scene": id, "error": e}));
                 break;
             }
             let lock_wait = filmcraft_export::export_lock_wait();
@@ -582,5 +583,35 @@ pub fn project(o: &Opts) -> Vec<Value> {
     let mbytes = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0) as f64 / 1e6;
     eprintln!("project: save {:.0} ms, open {:.0} ms ({clips} clips, {mbytes:.1} MB)", median(&save), median(&open));
     let row = |what: &str, v: &[f64]| json!({"what": what, "clips": clips, "mbytes": mbytes, "p50_ms": median(v), "min_ms": v.iter().cloned().fold(f64::MAX, f64::min), "runs_ms": v, "load": load_avg()});
-    vec![row("save (file.saveAs)", &save), row("open (file.open)", &open)]
+    let mut rows = vec![row("save (file.saveAs)", &save), row("open (file.open)", &open)];
+    if o.only.as_deref().is_none_or(|only| only == "persistent-undo") {
+        for i in 0..20 {
+            if let Err(error) = s.execute("file.newBin", json!({"name": format!("History {i}")})) {
+                rows.push(json!({"what": "persistent undo", "error": error.to_string()}));
+                return rows;
+            }
+        }
+        s.prefs.general.persistent_undo = true;
+        let mut timings = Vec::new();
+        for _ in 0..n {
+            let start = Instant::now();
+            if let Err(error) = s.execute("file.save", json!({})) {
+                rows.push(json!({"what": "persistent undo", "error": error.to_string()}));
+                return rows;
+            }
+            timings.push(ms(start.elapsed()));
+        }
+        let history = std::path::PathBuf::from(format!("{}.undo", file.to_string_lossy()));
+        match std::fs::metadata(history) {
+            Ok(meta) => {
+                let mut measured = row("save with persistent undo", &timings);
+                measured["historyEntries"] = json!(s.history.undo.len());
+                measured["historyMB"] = json!(meta.len() as f64 / 1e6);
+                measured["synchronous"] = json!(true);
+                rows.push(measured);
+            }
+            Err(error) => rows.push(json!({"what": "persistent undo", "error": format!("undo sidecar was not published: {error}")})),
+        }
+    }
+    rows
 }

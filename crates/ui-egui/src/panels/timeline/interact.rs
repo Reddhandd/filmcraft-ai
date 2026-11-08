@@ -1,6 +1,6 @@
 use super::clips::paint_hatch;
 use super::layout::{Layout, max_scroll, new_track_at};
-use super::menus::{CLIP_MENU, EditPointTarget, edit_point_menu, gap_menu, marker_menu, multicam_menu};
+use super::menus::{CLIP_MENU, EditPointTarget, edit_point_menu, gap_menu, marker_menu, multicam_menu, transition_menu};
 use super::snap::{snap, snap_playhead};
 use super::*;
 
@@ -227,7 +227,8 @@ pub(super) fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence
         && let Some(p) = ctx.input(|i| i.pointer.press_origin())
     {
         app.tl.cancelled = false;
-        let grab = grab_at(seq, layout, p, tool, mods, roll_ripple);
+        let grab =
+            selected_transition_grab(seq, layout, p, app.session.state.transition_selection.first().copied(), grab_at(seq, layout, p, tool, mods, roll_ripple));
         // the playhead jumps to a press on the ruler at once, not only once the pointer has moved (#1090)
         if matches!(grab, Grab::Other(Hit::Ruler)) {
             scrub_playhead(app, seq, layout, p, mods.shift);
@@ -280,7 +281,8 @@ pub(super) fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence
         && let Some(p) = pos
         && area.contains(p)
     {
-        let g = grab_at(seq, layout, p, tool, mods, roll_ripple);
+        let g =
+            selected_transition_grab(seq, layout, p, app.session.state.transition_selection.first().copied(), grab_at(seq, layout, p, tool, mods, roll_ripple));
         let blocked = tool == Tool::Selection
             && match g.hit() {
                 Hit::Clip { clip, .. } => {
@@ -299,6 +301,7 @@ pub(super) fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence
             CursorIcon::NotAllowed
         } else {
             match (tool, g) {
+                (Tool::Marquee, _) => CursorIcon::Crosshair,
                 (_, Grab::Edge { .. }) => CursorIcon::ResizeColumn,
                 (Tool::Selection, Grab::Other(Hit::Transition { edge: Some(_), .. })) => CursorIcon::ResizeColumn,
                 (Tool::Selection, Grab::Other(Hit::Transition { edge: None, .. })) => CursorIcon::Grab,
@@ -336,7 +339,17 @@ pub(super) fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence
             // a press and release in the same frame is never stored: it happened where egui says
             None => {
                 let Some(p) = resp.interact_pointer_pos() else { return };
-                Pressed { pos: p, tick: layout.tick_at(p.x), grab: grab_at(seq, layout, p, tool, mods, roll_ripple) }
+                Pressed {
+                    pos: p,
+                    tick: layout.tick_at(p.x),
+                    grab: selected_transition_grab(
+                        seq,
+                        layout,
+                        p,
+                        app.session.state.transition_selection.first().copied(),
+                        grab_at(seq, layout, p, tool, mods, roll_ripple),
+                    ),
+                }
             }
         };
         let (p, t) = (pressed.pos, pressed.tick);
@@ -352,12 +365,41 @@ pub(super) fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence
             // `pressed`, so the pan starts from where the button went down
             _ if resp.drag_started_by(egui::PointerButton::Middle) => {
                 let last = ctx.input(|i| i.pointer.press_origin()).unwrap_or(p);
-                Some(Drag::Pan { last, start_scroll: app.ui.timeline.target_scroll, start_v: app.ui.timeline.v_scroll })
+                if mods.alt {
+                    let anchor = app.session.playhead().seconds();
+                    Some(Drag::PlayheadZoom {
+                        from: last,
+                        start_pps: app.ui.timeline.pps,
+                        start_scroll: app.ui.timeline.scroll,
+                        anchor,
+                        anchor_x: layout.x_of(app.session.playhead()),
+                    })
+                } else {
+                    Some(Drag::Pan { last, start_scroll: app.ui.timeline.target_scroll, start_v: app.ui.timeline.v_scroll })
+                }
             }
             (_, Grab::Other(Hit::Ruler)) => Some(Drag::Scrub { initial: app.session.playhead() }),
             (_, Grab::Other(Hit::WorkArea { edge })) => {
                 seq.work_area.filter(|_| resp.drag_started()).map(|w| Drag::WorkArea { edge, from: t, start: w.start, end: w.end() })
             }
+            // Selection-only even over clip edges, volume lines and transitions.
+            (Tool::Marquee, _) if layout.content.contains(p) => {
+                if resp.drag_started() {
+                    Some(Drag::Marquee { start: p, before: app.session.state.selection.clone(), add: mods.shift || mods.command, individual: mods.alt })
+                } else {
+                    let clips = match grab.hit() {
+                        Hit::Clip { clip, .. } => vec![clip.0],
+                        _ => Vec::new(),
+                    };
+                    if let Err(e) =
+                        app.session.execute("timeline.select", json!({"clips": clips, "toggle": mods.shift, "add": mods.command, "linked": !mods.alt}))
+                    {
+                        app.ui.status = e.to_string();
+                    }
+                    None
+                }
+            }
+            (Tool::Marquee, _) => None,
             (Tool::Hand, _) => Some(Drag::Pan { last: p, start_scroll: app.ui.timeline.target_scroll, start_v: app.ui.timeline.v_scroll }),
             (Tool::Zoom, _) => {
                 if resp.clicked() {
@@ -461,6 +503,16 @@ pub(super) fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence
             // click a transition to select it (Shift adds / removes); drag an end to change its
             // duration or its middle to slide it over the cut (#430, #224)
             (Tool::Selection, Grab::Other(Hit::Transition { id, edge, .. })) => {
+                let (id, edge) = match transition_target(
+                    seq,
+                    layout,
+                    p,
+                    app.session.state.transition_selection.first().copied(),
+                    resp.clicked() && !resp.double_clicked(),
+                ) {
+                    Some(Hit::Transition { id, edge, .. }) => (id, edge),
+                    _ => (id, edge),
+                };
                 // a drag of a selected transition (Shift too) moves it rather than toggling it out first
                 if !(app.session.state.transition_selection.contains(&id) && resp.drag_started()) {
                     let r = app.session.execute("timeline.select", json!({"transitions": [id.0], "toggle": mods.shift}));
@@ -526,6 +578,14 @@ pub(super) fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence
                         let _ = app.session.execute("edit.undo", json!({}));
                     }
                 }
+                Drag::PlayheadZoom { start_pps, start_scroll, .. } => {
+                    let v = &mut app.ui.timeline;
+                    v.pps = start_pps;
+                    v.target_pps = start_pps;
+                    v.scroll = start_scroll;
+                    v.target_scroll = start_scroll;
+                    app.tl.zoom_anchor = None;
+                }
                 Drag::Pan { start_scroll, start_v, .. } => {
                     let v = &mut app.ui.timeline;
                     v.target_scroll = start_scroll;
@@ -559,6 +619,12 @@ pub(super) fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence
                 }
                 app.session.set_playhead(tt);
                 Some(Drag::Scrub { initial })
+            }
+            Drag::PlayheadZoom { from, start_pps, start_scroll, anchor, anchor_x } => {
+                let factor = (f64::from(p.x - from.x) * 0.01).clamp(-20.0, 20.0).exp();
+                app.ui.timeline.target_pps = (start_pps * factor).clamp(0.05, 24_000.0);
+                app.tl.zoom_anchor = Some((anchor, anchor_x));
+                Some(Drag::PlayheadZoom { from, start_pps, start_scroll, anchor, anchor_x })
             }
             Drag::Pan { last, start_scroll, start_v } => {
                 let dx = p.x - last.x;
@@ -679,7 +745,7 @@ pub(super) fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence
             !blocked
         });
         // auto-scroll when dragging near the edges
-        if !matches!(app.tl.drag, Some(Drag::Pan { .. }) | Some(Drag::ZoomBar { .. }) | Some(Drag::Volume(_))) {
+        if !matches!(app.tl.drag, Some(Drag::Pan { .. }) | Some(Drag::PlayheadZoom { .. }) | Some(Drag::ZoomBar { .. }) | Some(Drag::Volume(_))) {
             let v = &mut app.ui.timeline;
             if p.x > layout.content.max.x - 20.0 {
                 v.target_scroll += 6.0 / v.pps;
@@ -769,7 +835,7 @@ pub(super) fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence
     if resp.double_clicked()
         && tool == Tool::Selection
         && let Some(p) = resp.interact_pointer_pos()
-        && let Hit::Transition { id, .. } = hit(seq, layout, p)
+        && let Some(Hit::Transition { id, .. }) = transition_target(seq, layout, p, app.session.state.transition_selection.first().copied(), false)
     {
         crate::panels::transition_controls::open_duration(app, id);
     }
@@ -833,6 +899,22 @@ pub(super) fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence
         }
         ctx.data_mut(|d| d.insert_temp(marker_menu_id, marker.map(|m| m.id)));
     }
+    let transition_menu_id = egui::Id::unique("timeline.transitionMenu.target");
+    if resp.secondary_clicked()
+        && let Some(pointer) = resp.interact_pointer_pos()
+    {
+        let selected = match transition_target(seq, layout, pointer, app.session.state.transition_selection.first().copied(), false) {
+            Some(Hit::Transition { id, .. }) => Some(id),
+            _ => None,
+        };
+        ctx.data_mut(|data| data.insert_temp(transition_menu_id, selected));
+        if let Some(id) = selected {
+            if let Err(error) = app.session.execute("timeline.select", json!({"transitions": [id.0]})) {
+                app.ui.status = error.to_string();
+            }
+            ctx.data_mut(|data| data.insert_temp::<Option<EditPointTarget>>(edit_point_menu_id, None));
+        }
+    }
     if resp.secondary_clicked()
         && let Some(p) = resp.interact_pointer_pos()
         && let Hit::Clip { clip, edge, track } = hit(seq, layout, p)
@@ -865,6 +947,10 @@ pub(super) fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence
             ui.set_min_width(220.0);
             if let Some(marker) = ctx.data(|d| d.get_temp::<Option<MarkerId>>(marker_menu_id)).flatten() {
                 marker_menu(app, &ctx, ui, marker);
+                return;
+            }
+            if ctx.data(|d| d.get_temp::<Option<filmcraft_project::TransitionId>>(transition_menu_id)).flatten().is_some() {
+                transition_menu(app, &ctx, ui);
                 return;
             }
             if let Some(target) = ctx.data(|d| d.get_temp::<Option<EditPointTarget>>(edit_point_menu_id)).flatten() {

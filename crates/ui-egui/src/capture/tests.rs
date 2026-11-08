@@ -369,3 +369,107 @@ fn mixed_order_geometry_failures_reject_every_shot_without_shifting_indices() {
         assert!(reply["error"].as_str().unwrap_or_default().contains("aggregate"), "{reply}");
     }
 }
+
+#[test]
+fn inline_capture_delivers_pixels_and_identity_without_a_path() {
+    let ctx = egui::Context::default();
+    let mut app = app();
+    app.capture_geometry = Some(geometry(&app));
+    let (tx, rx) = channel();
+    admit_inline(&mut app, &ctx, None, 320, tx);
+    let shot = app.shots.requests.pop().unwrap();
+    assert!(shot.path.is_none());
+    let revision = app.session.revision;
+    let epoch = app.session.document_epoch;
+    complete_shot(shot, Ok(Arc::new(ColorImage::filled([800, 600], Color32::RED))));
+    let reply = rx.recv().unwrap();
+    assert_eq!(reply["ok"], true);
+    assert!(reply["result"]["pngBase64"].as_str().unwrap().starts_with("iVBORw0KGgo"));
+    assert_eq!(reply["result"]["revision"], revision);
+    assert_eq!(reply["result"]["documentEpoch"], epoch);
+    assert_eq!(reply["result"]["retainedFiles"], 0);
+    assert!(reply["result"].get("path").is_none());
+    assert_eq!(app.session.revision, revision);
+}
+
+#[test]
+fn replacing_a_document_with_identical_ids_and_revision_invalidates_capture() {
+    let mut app = app();
+    let before = active_document(&app);
+    app.session.document_epoch += 1;
+    assert_ne!(active_document(&app), before);
+}
+
+fn timeline_layout() -> crate::panels::timeline::Layout {
+    crate::panels::timeline::Layout {
+        content: Rect::from_min_max(pos2(100.0, 50.0), pos2(600.0, 450.0)),
+        ruler: Rect::from_min_max(pos2(100.0, 30.0), pos2(600.0, 50.0)),
+        rows: vec![],
+        pps: 100.0,
+        scroll: 0.0,
+        split_y: 250.0,
+    }
+}
+
+#[test]
+fn focused_range_uses_visible_geometry_and_rejects_offscreen_or_subpixel_ranges() {
+    let layout = timeline_layout();
+    let second = filmcraft_time::Tick::from_seconds_f64(1.0).0;
+    assert_eq!(focused_timeline_crop(&layout, [0.0, 20.0, 650.0, 450.0], [second, second * 2]).unwrap(), [200.0, 20.0, 100.0, 450.0]);
+    for range in [[-1, second], [second, second], [second * 4, second * 6], [0, 1]] {
+        assert!(focused_timeline_crop(&layout, [0.0, 20.0, 650.0, 450.0], range).is_err());
+    }
+    let mut hostile = layout;
+    hostile.pps = f64::NAN;
+    assert!(focused_timeline_crop(&hostile, [0.0, 20.0, 650.0, 450.0], [0, second]).is_err());
+}
+
+#[test]
+fn timeline_context_is_bounded_and_view_identity_tracks_waveform_visibility() {
+    let mut app = app();
+    app.tl.layout = Some(timeline_layout());
+    for id in 0..100 {
+        app.auto.add(&format!("timeline.clip.{id}"), Rect::from_min_size(pos2(150.0, 100.0), vec2(20.0, 20.0)), "clip");
+    }
+    let context = timeline_context(&app, [0.0, 20.0, 650.0, 450.0]).unwrap();
+    assert_eq!(context["clipIds"].as_array().unwrap().len(), 64);
+    assert_eq!(context["clipsTruncated"], true);
+    assert_eq!(context["visibleRangeTicks"][0], 0);
+    let before = timeline_view(&app);
+    app.ui.timeline.show_waveforms = !app.ui.timeline.show_waveforms;
+    assert_ne!(before, timeline_view(&app));
+    app.tl.layout.as_mut().unwrap().pps = 0.0;
+    assert!(timeline_context(&app, [0.0, 20.0, 650.0, 450.0]).is_err());
+}
+
+#[test]
+fn changing_timeline_view_rejects_an_inflight_capture() {
+    let ctx = egui::Context::default();
+    let mut app = app();
+    app.tl.layout = Some(timeline_layout());
+    let (_rx, _token) = admit_one(&mut app, &ctx);
+    let view = timeline_view(&app);
+    app.shots.requests.first_mut().unwrap().timeline_view = view;
+    assert_eq!(identity_reason(&app, &ctx, app.shots.requests.first().unwrap()), None);
+    app.ui.timeline.a_scroll += 10.0;
+    assert!(identity_reason(&app, &ctx, app.shots.requests.first().unwrap()).unwrap().contains("timeline view changed"));
+}
+
+#[test]
+fn canonical_timeline_panel_carries_waveform_context_in_the_image_reply() {
+    let ctx = egui::Context::default();
+    let mut app = app();
+    app.tl.layout = Some(timeline_layout());
+    let id = format!("panel.{}", crate::dock::PanelKind::Timeline.id());
+    app.auto.add(&id, Rect::from_min_size(pos2(0.0, 20.0), vec2(650.0, 450.0)), "Timeline");
+    let (_rx, _) = admit_one(&mut app, &ctx);
+    let shot = app.shots.requests.first_mut().unwrap();
+    shot.inline_max_side = Some(960);
+    shot.crop_target = Some(CropTarget::Element(id));
+    assert!(matches!(try_issue_shot(&mut app, &ctx, 0), IssueOutcome::Issued));
+    let shot = app.shots.requests.first().unwrap();
+    assert!(shot.timeline_context.is_some(), "real panel identity must enable timeline metadata");
+    let reply = image_reply(shot, &ColorImage::filled([800, 600], Color32::BLACK));
+    assert_eq!(reply["result"]["timeline"]["waveformsEnabled"], app.ui.timeline.show_waveforms);
+    assert_eq!(reply["result"]["retainedFiles"], 0);
+}

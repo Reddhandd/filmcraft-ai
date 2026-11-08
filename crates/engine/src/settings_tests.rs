@@ -148,7 +148,7 @@ fn prefs_persist_through_the_data_directory() {
     s.start_autosave(crate::autosave::AutosaveConfig::new(&dir)).unwrap();
     s.execute(
         "prefs.set",
-        json!({"values": {"timeline.stillImageDuration": 3, "appearance.colorTheme": "light", "labels.colors.rose.name": "Hero", "audioHardware.sampleRate": "96000"}}),
+        json!({"values": {"timeline.stillImageDuration": 3, "appearance.colorTheme": "light", "labels.colors.rose.name": "Hero", "audioHardware.sampleRate": "96000", "general.showPerformanceMatchTrimWarning": false}}),
     )
     .unwrap();
     s.shutdown();
@@ -162,6 +162,7 @@ fn prefs_persist_through_the_data_directory() {
     assert_eq!(s2.prefs.appearance.color_theme, "light");
     assert_eq!(s2.prefs.labels.name(Label::Rose), "Hero");
     assert_eq!(s2.prefs.audio_hardware.sample_rate, 96_000);
+    assert!(!s2.prefs.general.show_performance_match_trim_warning);
     let got = s2.execute("prefs.get", json!({"key": "labels.colors.rose.name"})).unwrap();
     assert_eq!(got, "Hero");
     s2.shutdown();
@@ -850,4 +851,50 @@ fn builtin_label_presets_are_complete_and_distinct() {
         assert_eq!(labels.name(label), role);
     }
     assert!(!settings::is_builtin_label_preset("Team"));
+}
+
+#[test]
+fn codex_speaking_voice_is_an_app_preference_and_rejects_hostile_values() {
+    let dir = tmp_dir("codex-speaking-voice");
+    let path = dir.join("preferences.json");
+    let mut s = Session { prefs_path: Some(path.clone()), ..Session::default() };
+    let before = filmcraft_format::encode(&s.project, false);
+    let revision = s.revision;
+    let epoch = s.document_epoch;
+    set(&mut s, "general.codexSpeakingVoice", json!("sol"));
+    assert_eq!(Preferences::load(&path).general.codex_speaking_voice, "sol");
+    for value in [json!(null), json!(false), json!(1), json!({}), json!("Sol"), json!("../sol"), json!("sol\n"), json!("é"), json!("x".repeat(65))] {
+        assert!(s.execute("prefs.set", json!({"key":"general.codexSpeakingVoice","value":value})).is_err());
+        assert_eq!(s.prefs.general.codex_speaking_voice, "sol");
+    }
+    assert_eq!(filmcraft_format::encode(&s.project, false), before);
+    assert_eq!((s.revision, s.document_epoch), (revision, epoch));
+    set(&mut s, "general.codexSpeakingVoice", json!(""));
+    assert_eq!(Preferences::load(&path).general.codex_speaking_voice, "");
+    std::fs::write(&path, r#"{"general":{"codexSpeakingVoice":"../invalid"}}"#).unwrap();
+    assert_eq!(Preferences::load(&path).general.codex_speaking_voice, "");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn codex_microphone_mode_persists_without_project_edits_and_rejects_hostile_values() {
+    let dir = tmp_dir("codex-microphone-mode");
+    let path = dir.join("preferences.json");
+    let mut s = Session { prefs_path: Some(path.clone()), ..Session::default() };
+    let before = filmcraft_format::encode(&s.project, false);
+    let identity = (s.revision, s.document_epoch);
+    assert!(!s.prefs.general.codex_voice_echo_reduction);
+    set(&mut s, "general.codexVoiceEchoReduction", json!(true));
+    assert!(Preferences::load(&path).general.codex_voice_echo_reduction);
+    for value in [json!(null), json!(1), json!({}), json!([]), json!("speakers"), json!("x".repeat(65536))] {
+        assert!(s.execute("prefs.set", json!({"key":"general.codexVoiceEchoReduction","value":value})).is_err());
+        assert!(s.prefs.general.codex_voice_echo_reduction);
+    }
+    set(&mut s, "general.codexVoiceEchoReduction", json!(false));
+    assert!(!Preferences::load(&path).general.codex_voice_echo_reduction);
+    std::fs::write(&path, r#"{"general":{"codexVoiceEchoReduction":"bad"}}"#).unwrap();
+    assert!(!Preferences::load(&path).general.codex_voice_echo_reduction);
+    assert_eq!(filmcraft_format::encode(&s.project, false), before);
+    assert_eq!((s.revision, s.document_epoch), identity);
+    std::fs::remove_dir_all(dir).unwrap();
 }

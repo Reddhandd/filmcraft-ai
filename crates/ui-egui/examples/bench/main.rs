@@ -13,7 +13,8 @@
 //! measured with `/usr/bin/time`). Wall-clock results depend on machine load, so every row
 //! records the load average, and CPU-time columns are reported alongside. Fixtures are generated
 //! with ffmpeg into `target/fixtures/playback/` on first use (see `fixtures.rs`); sections whose
-//! fixtures cannot be made are skipped. See `docs/performance.md`.
+//! fixtures cannot be made are reported as skipped/incomplete; `--required` fails qualification
+//! for either state. Child/export failures always fail the run. See `docs/performance.md`.
 
 mod fixtures;
 #[allow(dead_code)]
@@ -36,9 +37,38 @@ pub struct Opts {
     pub only: Option<String>,
     /// Settings ▸ Playback ▸ Hardware decoding: `auto` (default, as the app) or `off`.
     pub hw: String,
+    /// Hardware encoder selection, independent of decoding and compositing.
+    pub encode: String,
+    pub required: bool,
 }
 
 impl Opts {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let cpu = args.iter().any(|arg| arg == "--cpu");
+        let backend = |name: &str| -> Result<String, String> {
+            if args.iter().any(|arg| arg == name) && arg_value(args, name).is_none() {
+                return Err(format!("{name} needs auto or off"));
+            }
+            let value = arg_value(args, name).unwrap_or_else(|| if cpu { "off" } else { "auto" }.into());
+            if !matches!(value.as_str(), "auto" | "off") || cpu && value != "off" {
+                return Err(format!("{name} must be auto or off; --cpu requires off for every backend"));
+            }
+            Ok(value)
+        };
+        let repeat = match arg_value(args, "--repeat") {
+            Some(value) => value.parse::<usize>().ok().filter(|n| (1..=1000).contains(n)).ok_or("--repeat must be 1..1000")?,
+            None => 1,
+        };
+        Ok(Self {
+            repeat,
+            quick: args.iter().any(|arg| arg == "--quick"),
+            gpu: backend("--gpu-rendering")? != "off",
+            only: arg_value(args, "--only"),
+            hw: backend("--hw")?,
+            encode: backend("--encode")?,
+            required: args.iter().any(|arg| arg == "--required"),
+        })
+    }
     pub fn wants(&self, name: &str) -> bool {
         self.only.as_ref().is_none_or(|o| name.contains(o.as_str()))
     }
@@ -48,22 +78,27 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(true) => std::process::ExitCode::SUCCESS,
+        Ok(false) => std::process::ExitCode::FAILURE,
+        Err(error) => {
+            eprintln!("bench: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<bool, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "bench [--sections {}] [--repeat N] [--quick] [--cpu] [--only SUBSTRING] [--hw auto|off] [--label NAME] [--out DIR]\n       bench --section NAME [--json FILE]   (one section in this process)",
+            "bench [--sections {}] [--repeat N] [--quick] [--required] [--cpu] [--only SUBSTRING] [--hw auto|off] [--encode auto|off] [--gpu-rendering auto|off] [--label NAME] [--out DIR]\n       bench --section NAME [--json FILE]   (one section in this process)\n--cpu disables hardware decoding, hardware encoding and GPU rendering. --required rejects incomplete fixture/scenario coverage.",
             SECTIONS.join(",")
         );
-        return;
+        return Ok(true);
     }
-    let opts = Opts {
-        repeat: arg_value(&args, "--repeat").and_then(|v| v.parse().ok()).unwrap_or(1).max(1),
-        quick: args.iter().any(|a| a == "--quick"),
-        gpu: !args.iter().any(|a| a == "--cpu"),
-        only: arg_value(&args, "--only"),
-        hw: arg_value(&args, "--hw").unwrap_or_else(|| "auto".into()),
-    };
+    let opts = Opts::parse(&args)?;
     // as the desktop app: OS hardware decoders in front of ours, unless Hardware decoding is Off
     filmcraft_platform::register();
     filmcraft_codecs::hw::set_hardware_decoding(opts.hw != "off");
@@ -71,12 +106,12 @@ fn main() {
         let v = run_section(&section, &opts);
         let text = serde_json::to_string_pretty(&v).unwrap_or_default();
         match arg_value(&args, "--json") {
-            Some(p) => std::fs::write(&p, text).unwrap_or_else(|e| panic!("{p}: {e}")),
+            Some(p) => std::fs::write(&p, text).map_err(|error| format!("{p}: {error}"))?,
             None => println!("{text}"),
         }
-        return;
+        return Ok(section_passed(&v, opts.required));
     }
-    orchestrate(&args, &opts);
+    orchestrate(&args, &opts)
 }
 
 fn run_section(name: &str, o: &Opts) -> Value {
@@ -90,20 +125,44 @@ fn run_section(name: &str, o: &Opts) -> Value {
         "timeline" => sections::timeline(o),
         "export" => sections::export(o),
         "project" => sections::project(o),
-        _ => panic!("unknown section {name} (one of {})", SECTIONS.join(", ")),
+        _ => return json!({"section": name, "status": "failed", "error": format!("unknown section (one of {})", SECTIONS.join(", "))}),
     };
-    json!({"section": name, "rows": rows, "wall_s": t0.elapsed().as_secs_f64(), "load_before": load0, "load_after": playback::load_avg()})
+    let coverage = fixtures::coverage();
+    let failed = rows.iter().filter(|row| row.get("error").is_some()).count();
+    let status = if failed != 0 {
+        "failed"
+    } else if rows.is_empty() {
+        "skipped"
+    } else if coverage["skipped"].as_u64().unwrap_or(0) != 0 {
+        "incomplete"
+    } else {
+        "passed"
+    };
+    json!({"section": name, "status": status, "completedRows": rows.len().saturating_sub(failed), "failedRows": failed, "fixtures": coverage,
+        "requestedBackends": {"decode": o.hw, "encode": o.encode, "gpuRendering": if o.gpu {"auto"} else {"off"}},
+        "rows": rows, "wall_s": t0.elapsed().as_secs_f64(), "load_before": load0, "load_after": playback::load_avg()})
+}
+
+fn section_passed(value: &Value, required: bool) -> bool {
+    if value.get("error").is_some() || value.get("status").and_then(Value::as_str) == Some("failed") {
+        return false;
+    }
+    match value.get("status").and_then(Value::as_str) {
+        Some("passed") => true,
+        Some("skipped" | "incomplete") => !required,
+        _ => false,
+    }
 }
 
 /// Run each section in a child process under `/usr/bin/time` (peak RSS), then write JSON and
 /// Markdown reports.
-fn orchestrate(args: &[String], o: &Opts) {
+fn orchestrate(args: &[String], o: &Opts) -> Result<bool, String> {
     let wanted: Vec<String> =
         arg_value(args, "--sections").map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_else(|| SECTIONS.iter().map(|s| s.to_string()).collect());
     let label = arg_value(args, "--label").unwrap_or_else(|| "latest".into());
     let out = arg_value(args, "--out").map(PathBuf::from).unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/bench"));
-    std::fs::create_dir_all(&out).expect("output dir");
-    let exe = std::env::current_exe().expect("exe");
+    std::fs::create_dir_all(&out).map_err(|error| error.to_string())?;
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
     let machine = machine_info();
     println!("FilmCraft bench `{label}`: {}", machine["summary"].as_str().unwrap_or(""));
     let mut results = Vec::new();
@@ -115,14 +174,18 @@ fn orchestrate(args: &[String], o: &Opts) {
             cmd.arg("--quick");
         }
         if !o.gpu {
-            cmd.arg("--cpu");
+            cmd.args(["--gpu-rendering", "off"]);
         }
         if let Some(only) = &o.only {
             cmd.args(["--only", only]);
         }
         cmd.args(["--hw", &o.hw]);
+        cmd.args(["--encode", &o.encode]);
+        if o.required {
+            cmd.arg("--required");
+        }
         eprintln!("== {name} (load {})", playback::load_avg());
-        let output = cmd.stderr(std::process::Stdio::piped()).output().expect("run section");
+        let output = cmd.stderr(std::process::Stdio::piped()).output().map_err(|error| format!("{name}: {error}"))?;
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         // pass the child's progress output through (minus the time report)
         for l in child_lines(&stderr) {
@@ -133,18 +196,26 @@ fn orchestrate(args: &[String], o: &Opts) {
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_else(|| json!({"section": name, "error": format!("section failed: {}", output.status)}));
         let _ = std::fs::remove_file(&tmp);
+        if !output.status.success() && v.get("error").is_none() && !(o.required && matches!(v["status"].as_str(), Some("skipped" | "incomplete"))) {
+            v["status"] = json!("failed");
+            v["error"] = json!(format!("section exited with {}", output.status));
+        }
         if let Some(rss) = peak_rss_bytes(&stderr) {
             v["peak_rss_mb"] = json!(rss as f64 / 1e6);
         }
         println!("{}", section_markdown(&v));
         results.push(v);
     }
-    let doc = json!({"label": label, "machine": machine, "repeat": o.repeat, "quick": o.quick, "gpu": o.gpu, "hw": o.hw, "sections": results});
+    let passed = results.iter().all(|value| section_passed(value, o.required));
+    let completed = results.iter().filter(|value| value["status"] == "passed").count();
+    let doc = json!({"label": label, "machine": machine, "repeat": o.repeat, "quick": o.quick, "gpu": o.gpu, "hw": o.hw, "encode": o.encode,
+        "required": o.required, "expectedSections": wanted.len(), "completedSections": completed, "passed": passed, "sections": results});
     let jp = out.join(format!("bench-{label}.json"));
     let mp = out.join(format!("bench-{label}.md"));
-    std::fs::write(&jp, serde_json::to_string_pretty(&doc).unwrap_or_default()).expect("write json");
-    std::fs::write(&mp, markdown(&doc)).expect("write md");
+    std::fs::write(&jp, serde_json::to_string_pretty(&doc).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    std::fs::write(&mp, markdown(&doc)).map_err(|error| error.to_string())?;
     println!("wrote {} and {}", jp.display(), mp.display());
+    Ok(passed)
 }
 
 fn time_wrapper() -> Command {
@@ -202,7 +273,7 @@ fn machine_info() -> Value {
     let commit = Command::new("git")
         .arg("-C")
         .arg(&repo)
-        .args(["rev-parse", "--short", "HEAD"])
+        .args(["describe", "--always", "--dirty"])
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -233,7 +304,7 @@ fn f(v: &Value, k: &str, prec: usize) -> String {
 pub fn section_markdown(v: &Value) -> String {
     let name = v["section"].as_str().unwrap_or("?");
     let rows = v["rows"].as_array().cloned().unwrap_or_default();
-    let mut s = format!("### {name}\n\n");
+    let mut s = format!("### {name}\n\nStatus: {}\n\n", v["status"].as_str().unwrap_or("unknown"));
     if let Some(e) = v.get("error") {
         s += &format!("failed: {e}\n");
         return s;
@@ -372,4 +443,41 @@ fn markdown(doc: &Value) -> String {
         s += "\n";
     }
     s
+}
+
+#[cfg(test)]
+mod qualification_tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).into()).collect()
+    }
+
+    #[test]
+    fn cpu_qualification_cannot_accidentally_use_a_hardware_pipeline_stage() {
+        let options = Opts::parse(&args(&["--cpu"])).unwrap();
+        assert!(!options.gpu);
+        assert_eq!(options.hw, "off");
+        assert_eq!(options.encode, "off");
+        assert!(Opts::parse(&args(&["--cpu", "--encode", "auto"])).is_err());
+        for hostile in [&["--encode"][..], &["--hw", "invalid"][..], &["--repeat", "0"][..], &["--repeat", "1001"][..]] {
+            assert!(Opts::parse(&args(hostile)).is_err());
+        }
+        let options = Opts::parse(&args(&["--hw", "off", "--encode", "auto", "--gpu-rendering", "off"])).unwrap();
+        assert_eq!(options.hw, "off");
+        assert_eq!(options.encode, "auto");
+        assert!(!options.gpu);
+    }
+
+    #[test]
+    fn missing_and_failed_scenarios_cannot_pass_required_qualification() {
+        assert!(section_passed(&json!({"status": "passed"}), true));
+        for status in ["skipped", "incomplete", "failed"] {
+            assert!(!section_passed(&json!({"status": status}), true));
+        }
+        assert!(!section_passed(&json!({"status": "passed", "error": "child failed"}), false));
+        assert!(!section_passed(&json!({"error": "no report"}), false));
+        assert!(!section_passed(&json!({}), false));
+        assert!(!section_passed(&run_section("unknown", &Opts::parse(&[]).unwrap()), true));
+    }
 }

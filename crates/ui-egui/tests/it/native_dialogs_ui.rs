@@ -146,6 +146,53 @@ fn the_app_keeps_running_while_the_import_dialog_is_open_and_imports_when_it_ans
 }
 
 #[test]
+fn save_as_waits_for_the_dialog_and_saves_the_selected_project_path() {
+    let mut d = Driver::new(true);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("native-dialogs");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("save-dialog.fcproj");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(d.ok("ui.menu.invoke", json!({"id": "file.saveAs"})), json!({"dialog": "open"}));
+    assert!(d.app().native_dialog_open());
+    let (dialog, answer) = d.asked();
+    assert!(matches!(dialog, FileDialog::SaveProject { .. }));
+    d.frames(5);
+    assert!(!path.exists(), "the project must not be saved before a path is chosen");
+    answer.send(vec![path.to_string_lossy().into_owned()]).unwrap();
+    d.frames(3);
+    assert!(!d.app().native_dialog_open());
+    assert!(path.exists(), "Save As must write the chosen project path");
+}
+
+#[test]
+fn quick_export_and_label_presets_never_call_synchronous_pickers() {
+    let mut d = Driver::new(true);
+    d.app().hooks.pick_save_as = Some(Box::new(|_, _, _| panic!("synchronous save picker was called")));
+    d.app().hooks.pick_open_file = Some(Box::new(|_, _| panic!("synchronous open picker was called")));
+
+    d.click("header.quickExport");
+    d.click("quickExport.location");
+    let (dialog, answer) = d.asked();
+    assert!(matches!(dialog, FileDialog::SaveAs { .. }));
+    answer.send(vec![]).unwrap();
+    d.frames(2);
+
+    d.ok("ui.menu.invoke", json!({"id": "app.settings.labels"}));
+    d.frames(3);
+    d.click("settings.labelPresets.import");
+    let (dialog, answer) = d.asked();
+    assert!(matches!(dialog, FileDialog::OpenFile { .. }));
+    answer.send(vec![]).unwrap();
+    d.frames(2);
+
+    d.click("settings.labelPresets.export");
+    let (dialog, answer) = d.asked();
+    assert!(matches!(dialog, FileDialog::SaveAs { .. }));
+    answer.send(vec![]).unwrap();
+    d.frames(2);
+}
+
+#[test]
 fn cancelled_or_lost_dialogs_do_nothing_and_one_dialog_is_open_at_a_time() {
     let mut d = Driver::new(true);
     let before = d.items();

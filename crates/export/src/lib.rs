@@ -16,6 +16,7 @@
 use std::io::Write;
 
 mod aac_out;
+mod aac_timing;
 mod audio_out;
 mod deflate;
 mod job;
@@ -34,7 +35,7 @@ pub use pcm::{image_sequence_path, write_aiff, write_wav};
 pub use pipeline::limit_rgba8;
 pub use presets::{ExportPreset, builtin_presets};
 pub use settings::*;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 
 use filmcraft_isobmff::SampleEntry;
@@ -96,6 +97,15 @@ pub enum ExportError {
 
 pub type Result<T> = std::result::Result<T, ExportError>;
 
+/// Current work stage, independent of success/failure and result publication.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProgressPhase {
+    #[default]
+    Processing,
+    Finalizing,
+}
+
 /// Shared progress/cancel state of an export job.
 #[derive(Default)]
 pub struct Progress {
@@ -109,9 +119,42 @@ pub struct Progress {
     pub loudness: Mutex<Option<LoudnessReport>>,
     /// Readings of `done` over time, for [`Progress::eta`].
     pace: Mutex<pace::Pace>,
+    phase: AtomicU8,
 }
 
 impl Progress {
+    /// Final media units can be counted before the next stepped call finishes the file.
+    pub fn phase(&self) -> ProgressPhase {
+        let total = self.total.load(Ordering::Relaxed);
+        if self.phase.load(Ordering::Relaxed) == 1 || (!self.finished.load(Ordering::Relaxed) && total > 0 && self.done.load(Ordering::Relaxed) >= total) {
+            ProgressPhase::Finalizing
+        } else {
+            ProgressPhase::Processing
+        }
+    }
+
+    /// Batch producers restore Processing before starting the next segment.
+    pub fn set_phase(&self, phase: ProgressPhase) {
+        self.phase.store(u8::from(phase == ProgressPhase::Finalizing), Ordering::Relaxed);
+        if phase == ProgressPhase::Finalizing {
+            self.set_status("Finalizing");
+        } else {
+            let mut status = self.status.lock().unwrap_or_else(PoisonError::into_inner);
+            if status.as_str() == "Finalizing" {
+                status.clear();
+            }
+        }
+    }
+
+    /// Report the counted-unit boundary consistently before the finishing step runs.
+    pub fn status_text(&self) -> String {
+        if !self.finished.load(Ordering::Relaxed) && self.phase() == ProgressPhase::Finalizing {
+            "Finalizing".into()
+        } else {
+            self.status.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        }
+    }
+
     pub fn fraction(&self) -> f32 {
         let t = self.total.load(Ordering::Relaxed).max(1);
         self.done.load(Ordering::Relaxed) as f32 / t as f32
@@ -129,7 +172,7 @@ impl Progress {
         let (done, total) = (self.done.load(Ordering::Relaxed), self.total.load(Ordering::Relaxed));
         let mut pace = self.pace.lock().unwrap_or_else(PoisonError::into_inner);
         pace.observe(now, done);
-        if self.finished.load(Ordering::Relaxed) || done >= total {
+        if self.finished.load(Ordering::Relaxed) || self.phase() == ProgressPhase::Finalizing || done >= total {
             return None;
         }
         pace.eta(total - done)

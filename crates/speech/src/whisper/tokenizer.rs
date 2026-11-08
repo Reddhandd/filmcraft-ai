@@ -32,17 +32,15 @@ pub struct Tokenizer {
 
 /// GPT-2's byte → printable character table, inverted.
 fn unicode_to_byte() -> HashMap<char, u8> {
-    let mut bs: Vec<u32> = (b'!' as u32..=b'~' as u32).chain(0xA1..=0xAC).chain(0xAE..=0xFF).collect();
-    let mut cs = bs.clone();
-    let mut n = 0;
-    for b in 0..256u32 {
-        if !bs.contains(&b) {
-            bs.push(b);
-            cs.push(256 + n);
-            n += 1;
-        }
+    let printable: Vec<u8> = (b'!'..=b'~').chain(0xA1..=0xAC).chain(0xAE..=0xFF).collect();
+    let mut table: HashMap<char, u8> = printable.iter().map(|&byte| (char::from(byte), byte)).collect();
+    let remaining = (u8::MIN..=u8::MAX).filter(|byte| !printable.contains(byte));
+    // The 256-character range covers every possible remaining byte and contains only
+    // Unicode scalar values. No integer-to-char conversion or fallback is needed.
+    for (character, byte) in ('\u{0100}'..='\u{01ff}').zip(remaining) {
+        table.insert(character, byte);
     }
-    bs.iter().zip(&cs).map(|(&b, &c)| (char::from_u32(c).expect("valid"), b as u8)).collect()
+    table
 }
 
 impl Tokenizer {
@@ -175,6 +173,25 @@ pub fn group_words(tok: &Tokenizer, ids: &[u32]) -> Vec<(String, std::ops::Range
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_alphabet_decodes_space_utf8_and_control_bytes() {
+        let json = serde_json::json!({
+            "model": {"vocab": {"Hello\u{0120}world": 0, "\u{00c3}\u{00a9}": 1, "\u{0100}\u{010a}": 2}},
+            "added_tokens": [
+                {"id": 3, "content": "<|endoftext|>"},
+                {"id": 4, "content": "<|startoftranscript|>"},
+                {"id": 5, "content": "<|transcribe|>"},
+                {"id": 6, "content": "<|notimestamps|>"},
+                {"id": 7, "content": "<|0.00|>"}
+            ]
+        });
+        let tokenizer = Tokenizer::from_json(&json.to_string()).unwrap();
+        assert_eq!(tokenizer.decode(&[0, 1, 2]), "Hello worldé\0\n");
+        let table = unicode_to_byte();
+        assert_eq!(table.len(), 256);
+        assert_eq!(table.values().copied().collect::<std::collections::HashSet<_>>().len(), 256);
+    }
 
     #[test]
     fn sparse_huge_vocab_id_is_rejected_before_allocation() {

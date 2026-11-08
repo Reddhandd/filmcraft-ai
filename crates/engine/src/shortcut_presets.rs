@@ -10,6 +10,7 @@ pub type Entry = (&'static str, &'static str, &'static str);
 
 /// FilmCraft additions to the per-command defaults: panel-specific shortcuts.
 pub const FILMCRAFT_PANEL: &[Entry] = &[
+    ("playhead.returnToZero", "Enter", "Timeline"),
     ("project.delete", "Backspace", "Project"),
     // the forward-delete key (Delete on Windows and Linux keyboards) clears timeline clips too;
     // application-wide it is Project ▸ Clear (#243)

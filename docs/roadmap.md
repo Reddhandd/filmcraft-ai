@@ -1,17 +1,123 @@
 # Roadmap detail
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-22 · **Change:** minor (M8: Fujifilm F-Log / F-Log2 / F-Log2 C colour spaces) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-10-29 (implementation audit; parity estimates 2026-10-10) · **Last updated:** 2026-11-04 · **Change:** major (local consolidation, safety boundaries and current qualification evidence) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 Forward-looking plan: milestones with status, the current focus and what's next, with estimates in
 Opus 5.5 agent-hours (calibration in [target-app-parity.md](target-app-parity.md#calibration)).
 The one-page summary is [ROADMAP.md](../ROADMAP.md); the ranked work list is [gaps.md](gaps.md).
-There is no `cargo xtask scorecard` or `cargo xtask parity` yet ([G7](gaps.md#g7-no-measured-parity-tool-in-ci)).
+`cargo xtask parity` already measures menu/effect/transition presence and placement. Behavioural
+fidelity, broader coverage and a CI reference gate remain unfinished ([G7](gaps.md#g7-no-measured-parity-tool-in-ci)).
+The percentage and Opus 5.5 estimates are the historical 2026-10-10 assessment, not a new forecast.
+
+2026-10-29 local consolidation puts the native Command Console and the preserved editing workflow
+on one main baseline. Worker-failure completion, autosave reporting, identities, bounded input
+reads, MCP mutation outcomes and failed-edit/save transactions passed the combined local gate,
+native/MCP smoke and benchmark qualification. See [evidence and coverage limits](testing.md#consolidated-main-validation-2026-10-29).
+
+The owner approved an Apple Silicon-only portable FilmCraft AI alpha on 2026-11-05.
+The current release work is documented in [Apple Silicon alpha](apple-silicon-alpha.md):
+
+1. Preserve the accepted assistant stability, library and named-assistant autosave results.
+   Attended timeout recovery restored voice, working context and editing. Exact conversation
+   identity is optional; recovered assistant context and functioning tools are the acceptance target.
+2. Resolve the provider-side screenshot-retention requirement separately from the already-qualified
+   disk-free FilmCraft capture path, and qualify the latest Desktop reconnect report.
+3. Remove developer launch dependencies, include the matching MCP helper, and qualify a relocated,
+   private-data-free arm64 app with an isolated profile. Verify signing, dependency closure and
+   the update channel before preparing installation notes and the release archive.
+4. Playback and export-estimate accuracy follow-ups previously accepted for alpha stay deferred.
+   The audio-export concern was withdrawn: measured attenuation matches the intentional gain change.
+
+Windows, Linux, Intel Mac validation and Premiere `.prproj` import remain on hold. Direct API
+connections remain disabled and unresolved. The historical inventory below remains reference
+material rather than the scope of this release.
+
+The 2026-10-29 attended app + Console demo also established a new user requirement:
+[audio delivery and understanding](audio-understanding.md): deliver actual project-clip or timeline
+audio to an audio-capable model for useful music, dialogue and mix assessment. Beat detection
+describes the current baseline, not the requested scope. Provider input capability must be qualified.
+Queued by the owner for the next suitable focused milestone after the active stability and Console
+workflow checks. Start with provider/audio-delivery qualification, then a bounded clip/range MCP
+tool. Existing crash repairs take precedence. The existing demo and release-stage assessment are
+unchanged; see the plan's development scheduling and acceptance requirements.
+
+The initial [file attachments and creative memory presets](console-files-and-style-presets.md)
+implementation now supports bounded text/PDF/PNG references and reviewed, reusable chat-derived
+styles. Local real-Codex checks verified reference reading, style-guided edits, explicit-request
+precedence, fresh-project loading and Undo. Audio listening still requires actual original-audio qualification; project/range references
+currently supply metadata only. Low-bandwidth generated speech has reached the signed-in Codex
+WebRTC path, but that is not music/mix understanding or high-fidelity delivery acceptance. Direct
+API integration remains disabled and unresolved by owner decision. See
+[qualification and limits](testing.md#console-references-and-styles-2026-10-29).
+
+## Persistent Reference Library (owner requested 2026-11-03)
+
+Owner authorized the [complete Assistant Library/memory next-build scope](assistant-library-next-build.md)
+on 2026-11-05, including [additive assistant updates and recoverable memory compaction](assistant-memory-preservation.md).
+The current manual update/autosave paths replace instruction snapshots. The proposed
+requirements preserve prior teaching and require explicit conflict resolution/removal;
+the requirements are not a claim of implementation. Qualify the entire agreed scope
+before the next release build; the installed alpha remains unchanged during development.
+
+Owner explicitly requested implementation on 2026-11-05. A source candidate now provides
+local book copies, a versioned passage/term index, bounded search with physical page citations,
+background native controls and retrieval through the existing Console reference tool.
+Source qualification and packaging completed at `097dda3b`: 4,410 tests passed
+(52 skipped), with 49 WASM crates checked. The matching signed demo is ready;
+its headless save-copy check passed, and packaging preserved memory and library data.
+Twelve sampled citations were independently checked against their physical PDF pages.
+Matching C40 native checks subsequently passed library controls, filtered live retrieval from
+an original supplied book with a verified physical-page citation, named-assistant autosave,
+and full-app restoration of opt-in and reference selections. The owner subsequently accepted
+attended timeout recovery with restored context, voice and editing.
+The user can import books, editing guides, manuals and personal notes once into a persistent
+Reference Library. Save the documents and a reusable passage index across sessions and builds,
+so fresh Codex sessions can retrieve relevant material quickly without rereading whole books
+or injecting the full library into every conversation.
+
+Acceptance requirements:
+
+- Retain document identity and source metadata, with chapter/page references where available;
+  retrieved passages identify the supporting document and location.
+- Make the existing index available to fresh sessions; retrieve bounded, relevant excerpts on
+  demand and verify relevance and retrieval speed with representative documents.
+- Let users select references for a project or saved Project Assistant, separately from project
+  memory and creative preferences.
+- Adding, replacing or deleting documents updates the index; removed or superseded content must
+  not remain retrievable. Preserve the library across builds and qualify migration and recovery.
+- Keep imported private reference material local and out of Git/release assets. Make clear which
+  excerpts are sent to the connected AI. Malformed files, indexing failures and low disk must
+  report actionable errors without crashing or damaging projects or the existing library.
+
+The owner moved this milestone into implementation. Shared-library enable/remove controls are
+present in the signed package. C40 adds project/assistant reference subsets, filtered retrieval
+and stale-result guards; its full gate and matching native controls/persistence checks passed.
+Private books stay in the preserved data profile on D, outside Git and release assets.
+
+### Queued: on-demand reference page images (owner approved 2026-11-05)
+
+Implementation authorized within the complete next-build scope; rendering is not implemented yet.
+Owner-selected UI name: **Assistant Library**. Add **Window → Assistant Library**
+to open it independently of Command Console; retain the Console shortcut and use
+the same name there. This is one shared library, not a second copy of its data.
+Search should return text with stable document identity and physical PDF page references.
+When the connected AI needs an illustration or layout, it can explicitly request that
+specific admitted document/page through FilmCraft MCP. Render only requested pages;
+do not prerender the library or send entire books automatically. Deliver the actual image
+with its document/page citation, bounded dimensions, encoded bytes, concurrency and time.
+Use in-memory delivery with no retained temporary capture files, and release temporary
+buffers after delivery or failure. Provider-side conversation retention is separate and
+must not be described as deleted by FilmCraft. Reject removed documents, stale selections,
+invalid pages and unavailable rendering with actionable errors; never claim unseen content.
+Qualify actual image delivery and interpretation with representative illustrated books.
+OCR for searchable scanned books, strict-parser compatibility, and larger library capacity
+are separate follow-ups to scope and qualify before another release build.
 
 ## Current focus
 
 In order. Each item links to its gap entry, which says what "done" means.
 
-1. **Stop launch crashes and add pull-request CI** ([G4](gaps.md#g4-crashes-at-start-up-and-no-test-ci-on-pull-requests)): `cargo xtask ci` on macOS, Windows and Linux for every PR; old-macOS and Intel-GPU start-up. 40–80 h.
+1. **Stop launch crashes and verify pull-request CI** ([G4](gaps.md#g4-launch-crashes-and-cross-platform-pr-ci)): confirm `cargo xtask ci` on macOS, Windows and Linux for every PR; old-macOS and Intel-GPU start-up. 40–80 h.
 2. **Open `.prproj`** ([G2](gaps.md#g2-premieres-prproj-cannot-be-opened)): the beta blocker. 60–120 h.
 3. **10-bit / 4:2:2 camera media in software** ([G3](gaps.md#g3-10-bit-and-422-camera-media-needs-hardware)). 30–50 h.
 4. **Fidelity harness against Premiere** ([G1](gaps.md#g1-nothing-compares-our-output-with-premieres)) and **`cargo xtask parity`** ([G7](gaps.md#g7-no-measured-parity-tool-in-ci)): turns estimates into measurements. 50–90 h.
@@ -46,10 +152,10 @@ Beta = ready for real work ≥ ~75% and `.prproj` opens reliably ([target-app-pa
 
 | # | Milestone | Status | Est. |
 |---|---|---|---|
-| B1 | PR CI on three OSs + launch-crash fixes | ⬜ | 40–80 |
+| B1 | PR CI on three OSs + launch-crash fixes | 🟡 (workflow defined; live platform/launch evidence remains) | 40–80 |
 | B2 | `.prproj` import (sequences, clips, transitions, markers, bins, common effect parameters) | ⬜ | 60–120 |
 | B3 | Camera media: H.264 High 10 / 4:2:2, HEVC 4:2:2, E-AC-3, AVI, multi-track audio confirmed | 🟡 (multi-stream audio #361) | 50–90 |
-| B4 | Fidelity harness + `cargo xtask parity` + media corpus + workflow tests | ⬜ | 90–160 |
+| B4 | Fidelity harness + `cargo xtask parity` + media corpus + workflow tests | 🟡 (catalogue parity and console workflow qualification exist; broad corpus/fidelity remain) | 90–160 |
 | B5 | Hardware: zero-copy, more GPU effects, Windows vendor encoders, VideoToolbox Main 10 | 🟡 | 60–100 |
 | B6 | UI fidelity top issues and Windows / Linux runtime | 🟡 | 90–160 |
 | B7 | AAF / OMF validated in Avid and Pro Tools; XML import speed | ⬜ | 20–40 |

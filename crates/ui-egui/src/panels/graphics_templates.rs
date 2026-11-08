@@ -436,8 +436,18 @@ pub fn template_controls(
                 let r = craft_ui::ComboBox::from_id_salt(("gfx-tpl-font", clip.0, c.id.as_str())).selected_text(&fam).width(170.0).height(360.0).show_ui(
                     &mut vui,
                     |ui| {
-                        for (f, _) in filmcraft_text::families() {
-                            if ui.selectable_label(f == fam, &f).clicked() {
+                        crate::widgets::font_preview::prepare(ui);
+                        for (index, (f, _)) in filmcraft_text::families().into_iter().enumerate() {
+                            let row = crate::widgets::font_preview::row(ui, f == fam, &f);
+                            let visible = row.rect.intersect(ui.clip_rect());
+                            if visible.is_positive() {
+                                autos.push((
+                                    format!("{id}.option.{}", crate::widgets::font_preview::suffix(&f, index)),
+                                    visible,
+                                    crate::widgets::font_preview::label(&f),
+                                ));
+                            }
+                            if row.clicked() {
                                 set(json!(f), actions);
                             }
                         }
@@ -762,15 +772,39 @@ fn replace_dialog(app: &mut FilmcraftApp, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 ui.label(tl!("Replace:"));
                 let r = craft_ui::ComboBox::from_id_salt("gfx-rf-from").selected_text(&d.from).width(160.0).show_ui(ui, |ui| {
-                    for f in &fams {
-                        ui.selectable_value(&mut d.from, f.clone(), f);
+                    crate::widgets::font_preview::prepare(ui);
+                    for (index, f) in fams.iter().enumerate() {
+                        let row = crate::widgets::font_preview::row(ui, *f == d.from, f);
+                        let visible = row.rect.intersect(ui.clip_rect());
+                        if visible.is_positive() {
+                            elems.push((
+                                format!("replaceFonts.from.option.{}", crate::widgets::font_preview::suffix(f, index)),
+                                visible,
+                                crate::widgets::font_preview::label(f),
+                            ));
+                        }
+                        if row.clicked() {
+                            d.from = f.clone();
+                        }
                     }
                 });
                 elems.push(("replaceFonts.from".into(), r.response.rect, "Replace".into()));
                 ui.label(tl!("with:"));
                 let r = craft_ui::ComboBox::from_id_salt("gfx-rf-to").selected_text(&d.to).width(160.0).height(360.0).show_ui(ui, |ui| {
-                    for (f, _) in filmcraft_text::families() {
-                        ui.selectable_value(&mut d.to, f.clone(), &f);
+                    crate::widgets::font_preview::prepare(ui);
+                    for (index, (f, _)) in filmcraft_text::families().into_iter().enumerate() {
+                        let row = crate::widgets::font_preview::row(ui, f == d.to, &f);
+                        let visible = row.rect.intersect(ui.clip_rect());
+                        if visible.is_positive() {
+                            elems.push((
+                                format!("replaceFonts.to.option.{}", crate::widgets::font_preview::suffix(&f, index)),
+                                visible,
+                                crate::widgets::font_preview::label(&f),
+                            ));
+                        }
+                        if row.clicked() {
+                            d.to = f;
+                        }
                     }
                 });
                 elems.push(("replaceFonts.to".into(), r.response.rect, "With".into()));

@@ -7,6 +7,13 @@ use super::*;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct GeneralPrefs {
+    /// Opt-in project undo/redo sidecars; failures never prevent project saves.
+    pub persistent_undo: bool,
+    /// Console speaking-voice picker preference; empty omits the realtime override (Use Default).
+    /// Availability is checked against the runtime v3 catalog before opening the microphone.
+    pub codex_speaking_voice: String,
+    /// Headphones allow interruption; opt into output-time microphone suppression for speakers.
+    pub codex_voice_echo_reduction: bool,
     /// Interface language (persisted independently of projects): `en`, `ja`, `es`, `pt-br`, `uk`,
     /// `zh-cn`, `de`, `ru`, `fr`, `id`, `it`, or `system` (the default: the operating system's preferred language when the
     /// interface has it, otherwise English).
@@ -26,6 +33,7 @@ pub struct GeneralPrefs {
     pub show_tool_tips: bool,
     pub show_rich_tool_tips: bool,
     pub show_workspace_reset_warning: bool,
+    pub show_performance_match_trim_warning: bool,
     pub show_project_load_errors: bool,
     pub show_compatibility_issues: bool,
     pub show_project_bin_in_tab: bool,
@@ -37,6 +45,9 @@ pub struct GeneralPrefs {
 impl Default for GeneralPrefs {
     fn default() -> Self {
         Self {
+            persistent_undo: false,
+            codex_speaking_voice: String::new(),
+            codex_voice_echo_reduction: false,
             interface_language: "system".into(),
             at_startup: "showHome".into(),
             when_opening_project: "showOpenDialog".into(),
@@ -49,6 +60,7 @@ impl Default for GeneralPrefs {
             show_tool_tips: true,
             show_rich_tool_tips: true,
             show_workspace_reset_warning: true,
+            show_performance_match_trim_warning: true,
             show_project_load_errors: true,
             show_compatibility_issues: true,
             show_project_bin_in_tab: true,

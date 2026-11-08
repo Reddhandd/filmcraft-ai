@@ -38,6 +38,108 @@ claude mcp add filmcraft-headless -- /abs/path/filmcraft/target/release/filmcraf
 { "mcpServers": { "filmcraft": { "command": "/abs/path/filmcraft-cli", "args": ["mcp", "--bridge", "127.0.0.1:9876"] } } }
 ```
 
+### API request limits and recovery
+
+**Disabled / unresolved:** direct API connections are unavailable in future builds by owner
+request. Use Codex or Desktop ChatGPT. The following describes the preserved experimental
+implementation, not an enabled workflow; see [status and limitations](api-connection-status.md).
+
+The API provider bounds each user request to 24 tool rounds, then requests a final summary with
+`tool_choice: "none"`. Completed native results remain in a clean conversation checkpoint;
+continuing requires a new user message and never replays completed calls automatically. If the
+summary cannot be fetched, FilmCraft reports the pause locally. Cancellation, revoked ownership,
+and uncertain native outcomes still keep the interrupted-session guard: inspect project/history/jobs
+before starting another conversation rather than repeating an edit blindly.
+
+History has separate item and byte budgets. FilmCraft reserves space before admitting more native
+operations, including room for tool results and the final response. At the conversation-history limit,
+save reusable instructions with **Save Assistant** and use **New Conversation**. A history-limit
+notice is not a billing or token-balance error. The API connection currently has no voice support.
+Actual frame, Source and timeline PNG captures may be inspected; metadata alone does not establish
+that audio was heard or continuous video was watched.
+
+### Console controls
+
+The Studio Console layout uses original symbol buttons with function names on hover and keyboard
+focus. Existing automation IDs remain available. New conversation, resume, session lock and Undo
+remain above the conversation; project memory stays beside Save Assistant. Conversation output is
+above the composer, retaining native text selection and Copy/Paste. Model, speaking-voice and
+microphone settings open with `console.settings.toggle`; `ui.inspect.console.settingsOpen` reports
+that state. Voice controls and failures remain outside settings. Desktop ChatGPT uses its external
+composer and audio controls. Manual commands and command diagnostics are under the collapsed
+**Diagnostics & manual commands** section (`console.advanced.toggle`).
+
+### In-app Command Console profile
+
+The desktop console launches the matching bundled CLI with `mcp --controller-console --bridge
+127.0.0.1:PORT` and an inherited control token. Its version is `filmcraft-console/5`; this profile
+differs from the general MCP server and the separate bounded controller preview/commit profiles:
+
+- `console_capabilities` supplies the versioned operating guide, owned-analysis schemas and limits.
+- `project_inspect` and `sequence_inspect` return compact pages (32 rows by default, at most
+  64 and 24 KiB). Follow `nextOffset` with `offset` and `expected_revision=revision`; restart
+  after an edit. Sequence filters include `item`, `track`, `clip` and `kind` (`clips`, `tracks`,
+  `markers`, `selection`, `effects`, `parameters`, `keyframes`). Effects require a clip;
+  parameters also require a zero-based effect index; keyframes also require a parameter name.
+  Read only relevant pages after each major operation and before the next clip. A first page
+  is never evidence that omitted clips do not exist. `doc_inspect` contains first pages only.
+  Names/paths are limited to 512 UTF-8 bytes; parameter values over 2 KiB are explicitly omitted.
+  The corresponding native queries are `project.inspectPage` / `sequence.inspectPage`, using
+  `expectedRevision` (camel case). Native full inspection remains available outside Console.
+- Console results have a final serialized byte budget (48 KiB; frame images 384 KiB).
+  `resultOmitted` preserves the original error status and reports that a result was omitted,
+  not that a mutation failed. Never replay an edit to get a reply; inspect the current state.
+  Legacy full inspection IDs dispatched through `command_run` use the compact page queries.
+  Compact `ui_inspect` excludes chat history and full widget trees.
+- `command_list` discovers the running app's engine and UI registry, with filtering and pagination.
+  `enabled` reflects current selection; commands accepting explicit IDs may work without selection.
+- `command_run {id, params}` executes native commands directly, including playhead movement,
+  selection, import, editing, effects, saving and export. Routine edits need no Apply/Reject.
+  Opening a native dialog is not evidence that its operation completed.
+- `command_batch {label, steps}` groups 1–64 supported project edits into one atomic Undo action.
+  A failed step rolls the group back. File I/O, analysis, asynchronous mask tracking and UI controls run individually.
+- `console_analyze` runs native background `music`, `performance` or `passages` analysis.
+  `console_read_analysis` pages beat results and returns exact coordinate origins. Applications
+  accept app-owned `analysisId` values, not model-supplied plans; edits invalidate older results.
+  Section and timing-anchor overrides use the native validators. Passage trims require actual
+  start/middle/end phrase and boundary review; similarity scores cannot replace that review.
+- `console_memory` reads/searches/updates up to 1 MiB of saved local notes. Session context uses
+  bounded excerpts, not the entire enlarged store. Reads return `totalBytes`, `offset`, `nextOffset`,
+  `scope`, `documentEpoch` and `memoryGeneration`; follow continuations using `offset`, `scope`,
+  `document_epoch` and `memory_generation`. Read limits are 4–8192 UTF-8 bytes. Small default reads
+  remain whole when the encoded reply fits; larger/escaped replies explicitly report truncation.
+  `search` takes a literal case-sensitive `query` (1–256 bytes) and 1–8 hits, with bounded snippets.
+  `append` remains limited to 4096 bytes. `replace` requires the full exact prior `expected_text`.
+  `patch` replaces a passage of at most 8192 bytes using `offset`, exact `expected_text`, `text` and
+  current scope/epoch/generation. Restart reads after a stale-snapshot error. Unsaved editor changes,
+  detected disk conflicts and failed writes never authorize overwriting notes. Memory grants no
+  permissions and is separate from project save, Undo and crash recovery.
+  Unsaved manual notes block assistant writes and project replacement. Notes never grant permission.
+- `console_references` inspects pending reference coverage, removes attachments, adds project/range
+  metadata references and manages creative style drafts/library/selection. Arbitrary file attachment
+  paths and preset import/export remain native user controls. Text/PDF/PNG references and style
+  preferences grant no tool authority. See [formats, budgets and persistence](console-reference-inputs.md).
+
+New conversations can be durable before the project is saved. FilmCraft keeps a local conversation
+archive in its application data folder and project memory beside saved projects (`.fcproj.console`).
+The first save carries the conversation forward. Connect resumes the active thread, or the latest saved thread after an app restart, loading the current project context;
+Resume Codex Session opens a picker, including conversations started in an unsaved project. Codex
+owns full thread history; FilmCraft caches recent display messages. Resuming a conversation inspects
+the current project and does not reconstruct an unsaved timeline that was discarded.
+
+Console connection controls and microphone capture remain user controls. Voice starts off. Existing
+export destinations require explicit `overwrite:true` with user intent, or a new destination path.
+Use native Undo/Redo for edits, and inspect job results before claiming an export completed.
+
+The shared bridge retries only its exact allowlist of retry-safe reads. If a mutating request may have reached
+the app and its write or reply fails, it reports an unknown outcome instead of replaying the edit
+or starting a second job. Inspect the live project, history or jobs before issuing another mutation;
+an absent reply is not evidence that nothing happened. Even a valid UI-reply `"error":"timeout"` can
+precede the original edit executing; let it settle rather than automatically repeating it. Request
+IDs correlate replies, not deduplicate commands. See [the control protocol](control-protocol.md) for recovery semantics and
+[console qualification](testing.md#local-codex-console-qualification) for the latest real workflow
+evidence and musical-accuracy limitations.
+
 ### Effect parameter replies
 
 `effects.setParam` returns `{"keyframes": n, "param": id, "value": value}` on success.
@@ -90,6 +192,25 @@ claude mcp add filmcraft -- filmcraft-cli mcp
 Typical loop: `project_inspect` / `sequence_inspect` → get ids → `command_run` → `render_frame` or
 `ui_screenshot` → look at the result → `edit.undo` if it's wrong.
 
+To copy a timeline transition, run `sequence.copyTransition {"transition": id}`. Paste it at one or
+more cuts with `sequence.pasteTransition {"cuts": [{"clip": id, "edge": "in"}]}`; an `out` edge
+also works. Without explicit cuts, paste uses selected transitions, selected edit points, or exact
+playhead cuts on targeted tracks. Linked edit-point selections paste only onto tracks matching the
+copied transition’s audio/video kind. Explicitly supplied cuts still reject a kind mismatch.
+The effect, parameters, reverse direction and frame-based timing
+travel together. A bulk paste is one undo step and leaves clips in place. Locked tracks, mismatched
+audio/video cuts, insufficient clip span or missing source-media handles reject the entire paste
+without editing the sequence. Shorten the transition or move a clip's In/Out point to leave enough
+source frames around the cut. The transition clipboard is session state and is not saved in a
+project file.
+
+To edit an applied transition, run `sequence.setTransition {"transition": id, "effect": "wipe",
+"frames": 12, "align": "center"}`. `effect` accepts a video or audio transition id or name
+appropriate for the track. `duration` (ticks) and `start` (ticks) can be used for an exact span;
+`start` and `align` are alternatives. Other optional fields are `params`, `reverse`, and `reset`.
+The edit is one undo step. Timing edits reject spans without source handles; all edits reject a
+locked track. A successful paste selects the new transition IDs so Effect Controls follows them.
+
 ### Conventions
 
 The server follows a few conventions that make it predictable for agents. They are not
@@ -128,6 +249,11 @@ progress and stop it:
   time left at the job's speed over the last 15 seconds, `null` until a second of progress has been
   measured (a loudness pass, a seek) and once it is done. The app shows it as `37% · 2:05 left` in the
   status bar, the Export queue and the Progress panel.
+- Jobs and queue items also expose `phase` (`processing` or `finalizing`; `null` for queue items
+  without a job). This describes work, not success. Counters reaching their total do not prove the
+  file is finished: flush, container writing and preview publication can remain. During finalization
+  `etaSeconds` is `null` and the UI says Finalizing. Wait for the result/finished outcome; do not
+  replay an export because its counter reached 100% or its ETA disappeared.
 - With `"_meta": {"progressToken": T}` on the `tools/call`, the server sends
   `notifications/progress` `{progressToken: T, progress: <frames done>, total: <frames>, message:
   <job status>}` at most every 100 ms while frames advance. Without a token it sends none.
@@ -344,3 +470,17 @@ ROADMAP.md and [target-app-parity.md](target-app-parity.md) keep two numbers: **
   what works;
 - benchmarks state the machine, the load average and before/after on the same build;
 - don't raise a percentage without evidence a reviewer can rerun.
+
+### Console image delivery and user controls (contract 10)
+
+`capture_timeline {max_side?,range?}` delivers actual visible Timeline PNG pixels plus bounded time/zoom/identity context. An optional exact-tick range must already be visible. Capture does not change selection, playhead, zoom, playback or waveform visibility. Report closed, hidden or loading waveforms as limitations; blank pixels do not establish silence. Waveform images show visual amplitude/timing, not audio listening or musical identity. Use native analysis for exact measurements. No screenshot file is retained after AI delivery.
+
+`capture_source {max_side?}` captures only the currently visible Source monitor panel, distinct
+from Program output. It does not open media, change source selection, move a playhead or start
+playback. A closed/hidden panel returns an error; an empty monitor cannot establish anything about
+unseen media. Delivery is inline PNG through the same bounded, disk-free pipeline. This is a native
+FilmCraft tool, not permission to capture other applications or the whole desktop.
+
+Microphone mute is an explicit user control: it silences input while keeping AI speech audible, even while Codex is busy. Output Copy preserves the transcript; Paste into Message populates the draft and never sends it. `console.voice.mute`, `console.chat.copy` and `console.chat.paste` are user controls and cannot be invoked by the AI through `command_run`.
+
+Source checks do not establish packaged native acceptance: actual provider image interpretation, clipboard focus behavior and live microphone mute require separate qualification before release.

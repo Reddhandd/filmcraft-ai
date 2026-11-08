@@ -780,3 +780,83 @@ fn effect_source_integer_decimation_preserves_cpu_box_oracle() {
         }
     }
 }
+
+#[test]
+fn gpu_noise_preserves_cpu_field_at_exact_timestamps() {
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut compositor = GpuCompositor::new(&dev, &q);
+    let (w, h) = (67, 41);
+    let px = picture(w, h);
+    let frame = VideoFrame::rgba_f32(w, h, px.clone());
+    for seed in [0, 1, u32::MAX as u64, 80 * filmcraft_time::TICKS_PER_SECOND as u64, u64::MAX - 1, u64::MAX] {
+        for colored in [false, true] {
+            for clip in [false, true] {
+                let op = FxOp::Noise { amount: 0.85, grain: 3.5, colored, clip, seed };
+                let mut cpu = filmcraft_render::Image { w: w as usize, h: h as usize, px: px.clone() };
+                let e =
+                    effect("noise", &[("amount", fl(85.0)), ("grain_size", fl(7.0)), ("color", ParamValue::Bool(colored)), ("clip", ParamValue::Bool(clip))]);
+                filmcraft_render::effects::apply(&mut cpu, &e, &cx(Tick(seed as i64), 0.5));
+                let (_, _, gpu) = compositor.effect_image(&frame, &LayerFx { size: (w, h), decimation: 1, ops: vec![op] }).expect("noise image");
+                let (worst, flips) = compare(&cpu.px, &gpu);
+                assert!(worst <= EXACT && flips == 0.0, "seed={seed} colored={colored} clip={clip}: difference {worst}, flips {flips}");
+            }
+        }
+    }
+}
+
+#[test]
+fn gpu_negative_black_endpoint_keeps_shadow_ramp_continuous() {
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut compositor = GpuCompositor::new(&dev, &q);
+    let (w, h) = (2048u32, 3u32);
+    let mut pixels = Vec::new();
+    for jitter in [0.0f32, 0.00001, 0.0001] {
+        for x in 0..w {
+            let base = x as f32 * (0.01 / (w - 1) as f32);
+            pixels.extend_from_slice(&[(base + jitter).max(0.0), base, (base - jitter).max(0.0), 1.0].map(half));
+        }
+    }
+    let frame = VideoFrame::rgba_f32(w, h, pixels.clone());
+    for (temperature, tint) in [(-6.0, 3.0), (0.0, 0.0)] {
+        let e = effect(
+            "lumetri",
+            &[
+                ("exposure", fl(-0.65)),
+                ("contrast", fl(40.0)),
+                ("highlights", fl(-95.0)),
+                ("shadows", fl(14.0)),
+                ("whites", fl(-40.0)),
+                ("blacks", fl(-12.0)),
+                ("temperature", fl(temperature)),
+                ("tint", fl(tint)),
+                ("saturation", fl(75.0)),
+                ("creative_on", ParamValue::Bool(false)),
+                ("curves_on", ParamValue::Bool(false)),
+                ("vignette_on", ParamValue::Bool(false)),
+            ],
+        );
+        let context = cx(Tick::ZERO, 1.0);
+        let op = FxOp::eval(&e, &context, w as usize, h as usize).unwrap();
+        let mut reference = filmcraft_render::Image { w: w as usize, h: h as usize, px: pixels.clone() };
+        filmcraft_render::effects::apply(&mut reference, &e, &context);
+        let (_, _, gpu) = compositor.effect_image(&frame, &LayerFx { size: (w, h), decimation: 1, ops: vec![op] }).unwrap();
+        for (cpu, actual) in reference.px.iter().zip(&gpu) {
+            assert!(actual.is_finite());
+            assert!((cpu - actual).abs() < 1e-4, "shadow CPU/GPU mismatch: {cpu} vs {actual}");
+        }
+        for row in gpu.chunks_exact(w as usize * 4) {
+            for pair in row.as_chunks::<4>().0.windows(2) {
+                for k in 0..3 {
+                    assert!((pair[0][k] - pair[1][k]).abs() < 0.01, "colored shadow step: {pair:?}");
+                }
+            }
+        }
+        eprintln!("shadow ramp gate: actual GPU execution, temperature={temperature}, tint={tint}");
+    }
+}

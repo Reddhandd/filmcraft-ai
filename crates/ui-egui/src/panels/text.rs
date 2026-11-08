@@ -662,16 +662,18 @@ fn style_strip(app: &mut FilmcraftApp, ui: &mut egui::Ui, r: Rect, track_idx: us
     child.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         let r = craft_ui::ComboBox::from_id_salt(("caption-font", tr.id.0)).selected_text(&st.font).width(130.0).height(400.0).show_ui(ui, |ui| {
-            if !filmcraft_text::fonts::system_scanned() {
-                filmcraft_text::fonts::scan_system();
-            }
+            crate::widgets::font_preview::prepare(ui);
             // names starting with '.' are macOS-private system faces (UI/fallback fonts, some without a space glyph)
-            for (f, _) in filmcraft_text::families().into_iter().filter(|(f, _)| !f.starts_with('.')) {
-                let resp = ui.selectable_label(f.eq_ignore_ascii_case(&st.font), &f);
+            for (index, (f, _)) in filmcraft_text::families().into_iter().filter(|(f, _)| !f.starts_with('.')).enumerate() {
+                let resp = crate::widgets::font_preview::row(ui, f.eq_ignore_ascii_case(&st.font), &f);
                 // An edge row may be only partly visible; automation must click its visible portion.
                 let visible = resp.rect.intersect(ui.clip_rect());
                 if visible.is_positive() {
-                    app.auto.add(&format!("text.captions.style.font.option.{f}"), visible, &f);
+                    app.auto.add(
+                        &format!("text.captions.style.font.option.{}", crate::widgets::font_preview::suffix(&f, index)),
+                        visible,
+                        &crate::widgets::font_preview::label(&f),
+                    );
                 }
                 if resp.clicked() {
                     actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "font": f})));

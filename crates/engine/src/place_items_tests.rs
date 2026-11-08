@@ -53,6 +53,91 @@ fn a_failing_item_places_nothing() {
     assert_eq!(s.history.undo.len(), steps);
 }
 
+#[test]
+fn rejected_groups_preserve_cleanliness_history_and_published_events() {
+    for dirty in [false, true] {
+        let (mut s, _) = three();
+        if !dirty {
+            s.saved_revision = s.revision;
+        }
+        s.history.merge_key = Some("existing gesture".into());
+        s.journal = (0..10_000).map(|i| (format!("retained.{i}"), json!({}))).collect();
+        let before = s.project.clone();
+        let state = serde_json::to_value(&s.state).unwrap();
+        let history = s.history.clone();
+        let journal = s.journal.clone();
+        let revisions = (s.revision, s.saved_revision);
+        s.drain_events();
+        let result: crate::Result<()> = s.edit_group("Rejected group", |s| {
+            s.execute("file.newBin", json!({"name": "Must roll back"}))?;
+            Err(crate::EngineError::Other("injected group error".into()))
+        });
+        assert!(result.is_err());
+        assert_eq!(s.project, before);
+        assert_eq!(serde_json::to_value(&s.state).unwrap(), state);
+        assert_eq!(s.history.undo, history.undo);
+        assert_eq!(s.history.redo, history.redo);
+        assert_eq!(s.history.merge_key, history.merge_key);
+        assert_eq!(s.journal, journal);
+        assert_eq!((s.revision, s.saved_revision), revisions);
+        assert_eq!(s.is_dirty(), dirty);
+        assert!(s.drain_events().is_empty());
+        assert!(s.execute("file.newSequence", json!({"width": 0})).is_err());
+        assert_eq!((s.revision, s.saved_revision), revisions);
+    }
+}
+
+#[test]
+fn successful_group_does_not_merge_into_an_earlier_gesture() {
+    let (mut s, _) = three();
+    s.edit_merged("Gesture", "same key", |p, _| {
+        p.name = "Before".into();
+        Ok(())
+    })
+    .unwrap();
+    let steps = s.history.undo.len();
+    s.edit_group("Group", |s| {
+        s.edit_merged("Gesture", "same key", |p, _| {
+            p.name = "After".into();
+            Ok(())
+        })
+    })
+    .unwrap();
+    assert_eq!(s.history.undo.len(), steps + 1);
+    s.undo();
+    assert_eq!(s.project.name, "Before");
+}
+
+#[test]
+fn generic_and_merged_edits_refuse_ambiguous_identities_before_committing() {
+    for merged in [false, true] {
+        let mut s = Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        let sequence = s.state.active_sequence.unwrap();
+        s.edit_merged("Gesture", "identity-test", |p, _| {
+            p.name = "Retained".into();
+            Ok(())
+        })
+        .unwrap();
+        let project = s.project.clone();
+        let history = s.history.clone();
+        let revision = s.revision;
+        let corrupt = |p: &mut filmcraft_project::Project, _: &mut crate::EditorState| {
+            let q = p.sequence_mut(sequence).unwrap();
+            let repeated = q.video_tracks[0].items[0].clone();
+            q.audio_tracks[0].items.push(repeated);
+            Ok(())
+        };
+        let result = if merged { s.edit_merged("Gesture", "identity-test", corrupt) } else { s.edit("Bad identities", corrupt) };
+        assert!(result.unwrap_err().to_string().contains("duplicate clip id"));
+        assert_eq!(s.project, project);
+        assert_eq!(s.history.undo, history.undo);
+        assert_eq!(s.history.redo, history.redo);
+        assert_eq!(s.history.merge_key, history.merge_key);
+        assert_eq!(s.revision, revision);
+    }
+}
+
 /// `items` is checked: not a list, empty, mixed with `item`, or with one item's range.
 #[test]
 fn items_are_checked() {

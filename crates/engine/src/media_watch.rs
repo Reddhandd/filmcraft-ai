@@ -30,7 +30,12 @@ use crate::{MediaPool, Result, Session};
 pub type Stamp = (u64, u128);
 
 /// Stamps of the project's media files taken on a worker thread.
-pub type MediaScan = Arc<Mutex<Option<Vec<(String, Option<Stamp>)>>>>;
+pub type MediaScan = Arc<Mutex<Option<std::result::Result<Vec<(String, Option<Stamp>)>, String>>>>;
+
+fn complete_scan(out: &MediaScan, scan: impl FnOnce() -> Vec<(String, Option<Stamp>)>) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(scan)).map_err(|_| "Media refresh worker failed; retry the media scan".into());
+    *out.lock().unwrap_or_else(PoisonError::into_inner) = Some(result);
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn stamp(path: &str) -> Option<Stamp> {
@@ -79,11 +84,11 @@ impl Session {
         let slot: MediaScan = Arc::default();
         let out = slot.clone();
         let spawned = std::thread::Builder::new().name("media-watch".into()).spawn(move || {
-            let stamps = files.into_iter().map(|(p, file)| (p, stamp(&file))).collect();
-            *out.lock().unwrap_or_else(PoisonError::into_inner) = Some(stamps);
+            complete_scan(&out, || files.into_iter().map(|(p, file)| (p, stamp(&file))).collect());
         });
-        if spawned.is_ok() {
-            self.media_scan = Some(slot);
+        match spawned {
+            Ok(_) => self.media_scan = Some(slot),
+            Err(error) => self.error_toast("media", format!("Cannot start media refresh worker: {error}")),
         }
     }
 
@@ -91,7 +96,10 @@ impl Session {
     pub fn poll_media_scan(&mut self) -> Option<Result<Value>> {
         let stamps = self.media_scan.as_ref()?.lock().unwrap_or_else(PoisonError::into_inner).take()?;
         self.media_scan = None;
-        Some(self.apply_media_stamps(stamps))
+        Some(match stamps {
+            Ok(stamps) => self.apply_media_stamps(stamps),
+            Err(error) => Err(crate::EngineError::Other(error)),
+        })
     }
 
     /// Compare the media files' stamps with the ones last seen and read the changed files
@@ -163,5 +171,24 @@ impl Session {
         }
         self.bump_view();
         Ok(json!({"refreshed": refreshed.iter().map(|i| i.0).collect::<Vec<_>>()}))
+    }
+}
+
+#[cfg(test)]
+mod worker_tests {
+    use super::*;
+
+    #[test]
+    fn panicked_scan_reports_an_error_and_releases_the_pending_slot() {
+        let slot = MediaScan::default();
+        complete_scan(&slot, || panic!("injected media scan failure"));
+        let mut s = Session { media_scan: Some(slot), ..Default::default() };
+        assert!(s.poll_media_scan().unwrap().unwrap_err().to_string().contains("Media refresh worker failed"));
+        assert!(s.media_scan.is_none());
+        let next = MediaScan::default();
+        complete_scan(&next, Vec::new);
+        s.media_scan = Some(next);
+        assert_eq!(s.poll_media_scan().unwrap().unwrap(), json!({"refreshed": []}));
+        assert!(s.media_scan.is_none());
     }
 }

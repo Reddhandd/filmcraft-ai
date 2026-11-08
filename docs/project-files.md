@@ -3,6 +3,13 @@
 FilmCraft projects are `.fcproj` files: UTF-8 JSON with an explicit schema version. Reading and
 writing them is `crates/format` (`filmcraft-format`); the engine's `file.*` commands use it.
 
+Project and recovery input is limited to 256 MiB. Native reads check file size before allocation
+and stop after the limit even if the file grows. Decoding also checks the byte limit for hosts
+whose data is already in memory. Track and clip/caption identities must be unique within each
+sequence; separate sequence copies may retain their own internal ids. Ambiguous files return an
+error without replacing the current project or its undo history. Harmless older overlaps remain
+editable and are not rejected by this identity check.
+
 ## Format
 
 ```json
@@ -109,6 +116,8 @@ one. If a step fails, the temp file is removed and the old file is untouched.
 | `file.open {path}` | File ▸ Open Project… (⌘O) | returns `{schemaVersion, migrated}` |
 
 In the UI, Save / Save As / Save a Copy without a `path` show a file dialog.
+Save As adopts the destination-derived project/root name and path only after a successful write.
+An unsuccessful write preserves the previous name, path, cleanliness and undo/redo state.
 
 ## Auto Save
 
@@ -142,6 +151,13 @@ project opens. Folders on another computer or a device are never used.
 Preferences are stored in `<data dir>/preferences.json`. The `prefs.*` commands read and change them.
 
 ## Crash recovery
+
+Unexpected auto-save worker failure becomes a persistent status error and an Events/error-toast
+notification after worker events are polled. `file.autoSaveStatus` then reports `running:false`
+and `status.workerRunning:false`; `status.lastError` explains that recovery protection is
+unavailable and asks the user to save manually and restart. The unsaved in-memory project remains
+usable and manual saves still work. Recovery snapshots already on disk are retained. Recovery
+metadata reads are capped at 64 KiB; preference reads at 4 MiB use the existing defaults fallback.
 
 Premiere's auto-save can lose up to one interval of work. FilmCraft also keeps a **recovery journal**:
 

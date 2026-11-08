@@ -18,7 +18,8 @@ Using it needs FFI into C / Objective-C APIs, which is `unsafe` Rust. The bindin
 ## Decision
 
 Allow `unsafe` in exactly one crate, `crates/platform` (`filmcraft-platform`, layer L5), for one
-job: OS media FFI (hardware decoding, and hardware encoding through NVENC). Audio output, dialogs, menus
+job: OS media FFI (hardware decoding, and hardware encoding through NVENC), plus the single
+owner-approved cursor exception in the 2026-10-29 addendum below. Audio output, dialogs, menus
 and other OS integration do not go in it.
 
 Containment rules:
@@ -26,14 +27,15 @@ Containment rules:
 1. The crate does not use `lints.workspace = true`. Its own `[lints]` table copies the workspace
    lints except `unsafe_code = "deny"` (not `forbid`), and adds
    `clippy::undocumented_unsafe_blocks = "deny"`. Only the FFI modules (`videotoolbox`, `media_foundation::gpu` / `media_foundation::mft`,
-   `nvenc::ffi` / `nvenc::session` / `nvenc::device` on Windows and 64-bit Linux, and `vaapi::va` on Linux) carry `#[allow(unsafe_code)]`; the rest of the crate
+   `nvenc::ffi` / `nvenc::session` / `nvenc::device` on Windows and 64-bit Linux, and `vaapi::va` on Linux),
+   plus the single `cursor_screen_position` wrapper, carry `#[allow(unsafe_code)]`; the rest of the crate
    (the fallback logic in `hybrid`, the decoder logic in `media_foundation`, `annexb`, `biplanar`,
    the encoder logic in `nvenc`, H.264 and H.265 alike) has no `unsafe`. NVENC's H.265 support
    added no `unsafe` module: it reuses `nvenc::ffi` and `nvenc::session` (new data declarations and
    a second codec-configuration member of an existing union).
 2. Every `unsafe` block has a `// SAFETY:` comment saying why it is sound.
 3. The public API is safe: no `pub unsafe fn`, no raw pointers or FFI types in public signatures;
-   failures are `Result`s. The crate keeps the never-crash `deny(clippy::unwrap_used, …)`
+   media failures are `Result`s; the cursor wrapper returns `Option`. The crate keeps the never-crash `deny(clippy::unwrap_used, …)`
    attribute of every clean crate.
 4. No panic crosses the FFI boundary: the VideoToolbox output callback runs under `catch_unwind`
    and reports a panic as a failed frame. The Windows backend has no callbacks into Rust (it drives
@@ -43,6 +45,15 @@ Containment rules:
    `objc2-*` crates on macOS, the official `windows` crate on Windows: MIT OR Apache-2.0, already
    in the lockfile through wgpu / winit, with only the Win32 features the backend uses); elsewhere
    `register()` reports `Unavailable` and does nothing. It is not part of the wasm check (L5).
+
+## Narrow cursor exception (owner approved 2026-10-29)
+
+`cursor::cursor_screen_position` may call Windows `GetCursorPos` solely to locate an OS file
+drop while winit supplies no pointer events. The wrapper reads into a local `POINT`, has one
+documented unsafe block, returns only integer coordinates through a safe `Option` API, and
+returns `None` on failure or unsupported platforms. The UI retains its last egui pointer position
+as the fallback. This grants no permission for other non-media FFI, cursor manipulation, input
+injection or broader OS integration. Remove the workaround when winit exposes the drop position.
 
 ## The fallback guarantee
 

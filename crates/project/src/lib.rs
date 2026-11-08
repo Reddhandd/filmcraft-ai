@@ -213,6 +213,19 @@ impl Project {
         max
     }
 
+    /// Validate the identities used to address tracks, clips and captions in each sequence.
+    /// Separate sequence copies may share internal ids; each sequence is an independent context.
+    /// This does not check overlaps or durations, so it can guard loading and generic edits
+    /// without refusing otherwise editable structural damage from older builds.
+    pub fn check_identities(&self) -> Result<(), String> {
+        for item in self.sequences() {
+            if let ItemKind::Sequence(sequence) = &item.kind {
+                sequence.check_identities().map_err(|e| format!("sequence `{}` (id {}): {e}", item.name, item.id.0))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Add an item to a bin (root when None / not found).
     pub fn add_item(&mut self, name: &str, label: Label, kind: ItemKind, bin: Option<BinId>) -> ItemId {
         let id = ItemId(self.alloc_id());
@@ -492,5 +505,7 @@ impl Project {
     }
 }
 
+#[cfg(test)]
+mod identity_tests;
 #[cfg(test)]
 mod tests;

@@ -36,6 +36,7 @@ pub(super) fn queue_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect
                     let preset = it["preset"].as_str().filter(|s| !s.is_empty()).unwrap_or(CUSTOM);
                     let (label, col) = match status {
                         "ready" => (tl!("Ready").to_string(), t.text_dim),
+                        "encoding" if it["phase"] == "finalizing" => (tl!("Finalizing…").to_string(), t.accent),
                         "encoding" => (
                             tlf!("Encoding {n}%", n = format!("{:.0}", it["progress"].as_f64().unwrap_or(0.0) * 100.0)) + &crate::panels::eta_suffix(it),
                             t.accent,

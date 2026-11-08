@@ -19,8 +19,8 @@
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -479,7 +479,7 @@ impl Preferences {
     }
 
     pub fn load(path: &Path) -> Self {
-        fs::read(path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).map(Self::from_value).unwrap_or_default()
+        crate::bounded_io::file(path, 4 * 1024 * 1024).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).map(Self::from_value).unwrap_or_default()
     }
 
     pub fn save(&self, path: &Path) -> io::Result<()> {
@@ -511,6 +511,13 @@ pub fn default_data_dir() -> Option<PathBuf> {
     if let Some(d) = std::env::current_exe().ok().and_then(|exe| exe.parent().and_then(portable_data_dir)) {
         return Some(d);
     }
+    user_data_dir()
+}
+
+/// Stable per-user storage, independent of portable builds and explicit demo data roots.
+/// Shared connection policy belongs here rather than inside a build or project.
+pub fn user_data_dir() -> Option<PathBuf> {
+    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
     if cfg!(target_os = "macos") {
         return env("HOME").map(|h| h.join("Library/Application Support/FilmCraft"));
     }
@@ -534,6 +541,8 @@ pub struct JournalMeta {
     pub started_unix: i64,
     pub saved_unix: i64,
     pub revision: u64,
+    /// Revision-specific recovery history; absent in older journals.
+    pub history_revision: Option<u64>,
     pub project_name: String,
     pub project_path: Option<String>,
     pub generator: String,
@@ -592,7 +601,7 @@ pub fn scan_candidates(data_dir: &Path, skip: Option<&Path>) -> Vec<RecoveryCand
         }
         // Keep the snapshot even when session.json is missing or unreadable: the project
         // is still recoverable. Meta fields fall back to defaults.
-        let meta = fs::read(dir.join(META)).ok().and_then(|b| serde_json::from_slice::<JournalMeta>(&b).ok()).unwrap_or_default();
+        let meta = crate::bounded_io::file(&dir.join(META), 64 * 1024).ok().and_then(|b| serde_json::from_slice::<JournalMeta>(&b).ok()).unwrap_or_default();
         out.push(RecoveryCandidate { id: e.file_name().to_string_lossy().into_owned(), dir, meta });
     }
     out.sort_by(|a, b| b.meta.saved_unix.cmp(&a.meta.saved_unix).then(b.id.cmp(&a.id)));
@@ -601,7 +610,7 @@ pub fn scan_candidates(data_dir: &Path, skip: Option<&Path>) -> Vec<RecoveryCand
 
 /// Load a candidate's snapshot.
 pub fn load_candidate(c: &RecoveryCandidate) -> Result<filmcraft_format::Loaded, String> {
-    let b = fs::read(c.dir.join(SNAPSHOT)).map_err(|e| format!("{}: {e}", c.dir.display()))?;
+    let b = crate::bounded_io::file(&c.dir.join(SNAPSHOT), filmcraft_format::MAX_PROJECT_BYTES).map_err(|e| format!("{}: {e}", c.dir.display()))?;
     filmcraft_format::decode(&b).map_err(|e| e.to_string())
 }
 
@@ -630,6 +639,7 @@ impl AutosaveConfig {
 /// What the session last told the worker.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Sent {
+    pub view: Option<filmcraft_project::ProjectView>,
     pub revision: u64,
     pub saved_revision: u64,
     pub path: Option<String>,
@@ -637,19 +647,63 @@ pub(crate) struct Sent {
 
 struct Snapshot {
     project: Arc<Project>,
+    view: filmcraft_project::ProjectView,
+    view_updates: SharedViewUpdates,
+    history: crate::History,
     revision: u64,
     path: Option<String>,
+}
+
+// A stalled writer retains one latest view and at most one queued notification
+// per project snapshot, rather than allocating one channel payload per playback frame.
+type SharedViewUpdates = Arc<Mutex<ViewUpdates>>;
+
+#[derive(Default)]
+struct ViewUpdates {
+    latest: Option<filmcraft_project::ProjectView>,
+    queued: bool,
+}
+
+impl ViewUpdates {
+    fn queue(updates: &SharedViewUpdates, tx: &Sender<Msg>, view: filmcraft_project::ProjectView) {
+        let mut pending = updates.lock().unwrap_or_else(|error| error.into_inner());
+        pending.latest = Some(view);
+        if !pending.queued {
+            pending.queued = true;
+            let _ = tx.send(Msg::View(updates.clone()));
+        }
+    }
+
+    fn apply(snapshot: Option<&mut Snapshot>, updates: &SharedViewUpdates) -> bool {
+        let view = {
+            let mut pending = updates.lock().unwrap_or_else(|error| error.into_inner());
+            pending.queued = false;
+            pending.latest.take()
+        };
+        if let (Some(snapshot), Some(view)) = (snapshot, view)
+            && Arc::ptr_eq(&snapshot.view_updates, updates)
+            && snapshot.view != view
+        {
+            snapshot.view = view;
+            return true;
+        }
+        false
+    }
 }
 
 enum Msg {
     /// The project has unsaved changes at this revision.
     Dirty(Snapshot),
+    /// Only the working view changed; retain the worker's project/history snapshot.
+    View(SharedViewUpdates),
     /// Nothing unsaved (just saved / opened): drop the journal.
     Clean,
     Prefs(AutoSavePrefs),
     AutoSaveNow(Sender<Result<PathBuf, String>>),
     Flush(Sender<()>),
     Stop,
+    #[cfg(test)]
+    TestAction(Box<dyn FnOnce() + Send>),
 }
 
 /// Worker → session notifications.
@@ -676,12 +730,15 @@ pub enum WorkerEvent {
         revision: u64,
     },
     Error(String),
+    /// The worker can no longer protect unsaved changes.
+    Stopped(String),
 }
 
 /// Last activity, for `file.autoSaveStatus` and the UI.
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
+    pub worker_running: bool,
     pub last_auto_save: Option<String>,
     pub last_auto_save_unix: Option<i64>,
     pub auto_saves_written: u64,
@@ -705,6 +762,7 @@ pub struct Persistence {
     pub(crate) last_sent: Option<Sent>,
     lock: Option<File>,
     tx: Sender<Msg>,
+    view_updates: Option<SharedViewUpdates>,
     events: Receiver<WorkerEvent>,
     thread: Option<JoinHandle<()>>,
 }
@@ -737,6 +795,8 @@ impl Persistence {
             events: etx,
             latest: None,
             journaled: 0,
+            journaled_view: None,
+            history_path: None,
             autosaved: 0,
             first_pending: None,
             last_change: Instant::now(),
@@ -744,26 +804,49 @@ impl Persistence {
             meta: JournalMeta { pid, started_unix: started, generator: filmcraft_format::generator(), ..Default::default() },
         };
         w.next_autosave = Instant::now() + w.autosave_interval();
-        let thread = std::thread::Builder::new().name("filmcraft-autosave".into()).spawn(move || w.run(rx))?;
+        let failure_events = w.events.clone();
+        let thread = std::thread::Builder::new().name("filmcraft-autosave".into()).spawn(move || {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| w.run(rx))).is_err() {
+                let _ = failure_events
+                    .send(WorkerEvent::Stopped("Auto-save worker failed; recovery protection is unavailable. Save manually and restart FilmCraft.".into()));
+            }
+        })?;
         Ok(Self {
             data_dir: cfg.data_dir.clone(),
             session_dir,
             local_offset: cfg.local_offset,
             candidates,
-            status: Status::default(),
+            status: Status { worker_running: true, ..Status::default() },
             last_sent: None,
             lock: Some(lock),
             tx,
+            view_updates: None,
             events,
             thread: Some(thread),
         })
     }
 
-    pub(crate) fn send_dirty(&self, project: Arc<Project>, revision: u64, path: Option<String>) {
-        let _ = self.tx.send(Msg::Dirty(Snapshot { project, revision, path }));
+    pub(crate) fn send_dirty(
+        &mut self,
+        project: Arc<Project>,
+        revision: u64,
+        path: Option<String>,
+        history: crate::History,
+        view: filmcraft_project::ProjectView,
+    ) {
+        let updates = Arc::new(Mutex::new(ViewUpdates::default()));
+        self.view_updates = Some(updates.clone());
+        let _ = self.tx.send(Msg::Dirty(Snapshot { project, revision, path, history, view, view_updates: updates }));
     }
 
-    pub(crate) fn send_clean(&self) {
+    pub(crate) fn send_view(&self, view: filmcraft_project::ProjectView) {
+        if let Some(updates) = &self.view_updates {
+            ViewUpdates::queue(updates, &self.tx, view);
+        }
+    }
+
+    pub(crate) fn send_clean(&mut self) {
+        self.view_updates = None;
         let _ = self.tx.send(Msg::Clean);
     }
 
@@ -792,7 +875,21 @@ impl Persistence {
     }
 
     pub fn drain_events(&mut self) -> Vec<WorkerEvent> {
-        let ev: Vec<_> = self.events.try_iter().collect();
+        let mut ev = Vec::new();
+        loop {
+            match self.events.try_recv() {
+                Ok(event) => ev.push(event),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    if self.status.worker_running && !ev.iter().any(|event| matches!(event, WorkerEvent::Stopped(_))) {
+                        ev.push(WorkerEvent::Stopped(
+                            "Auto-save worker stopped; recovery protection is unavailable. Save manually and restart FilmCraft.".into(),
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
         for e in &ev {
             match e {
                 WorkerEvent::Journaled { revision, unix, serialize_ms, write_ms, bytes } => {
@@ -809,9 +906,18 @@ impl Persistence {
                 }
                 WorkerEvent::SavedProject { .. } => {}
                 WorkerEvent::Error(m) => self.status.last_error = Some(m.clone()),
+                WorkerEvent::Stopped(m) => {
+                    self.status.worker_running = false;
+                    self.status.last_error = Some(m.clone());
+                }
             }
         }
         ev
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_test_action(&self, action: impl FnOnce() + Send + 'static) {
+        let _ = self.tx.send(Msg::TestAction(Box::new(action)));
     }
 
     /// Stop the worker. A session that still has a journal (closed with unsaved changes) keeps its
@@ -823,7 +929,9 @@ impl Persistence {
         let snap = self.session_dir.join(SNAPSHOT);
         self.lock.take();
         if snap.is_file() {
-            if let Some(mut m) = fs::read(self.session_dir.join(META)).ok().and_then(|b| serde_json::from_slice::<JournalMeta>(&b).ok()) {
+            if let Some(mut m) =
+                crate::bounded_io::file(&self.session_dir.join(META), 64 * 1024).ok().and_then(|b| serde_json::from_slice::<JournalMeta>(&b).ok())
+            {
                 m.clean_exit = true;
                 let _ = filmcraft_format::atomic_write(&self.session_dir.join(META), &serde_json::to_vec_pretty(&m).unwrap_or_default());
             }
@@ -883,6 +991,8 @@ struct Worker {
     latest: Option<Snapshot>,
     /// Revision currently in the journal (0 = none) / last auto-saved revision.
     journaled: u64,
+    journaled_view: Option<filmcraft_project::ProjectView>,
+    history_path: Option<PathBuf>,
     autosaved: u64,
     first_pending: Option<Instant>,
     last_change: Instant,
@@ -897,7 +1007,7 @@ impl Worker {
 
     fn journal_due(&self) -> Option<Instant> {
         let s = self.latest.as_ref()?;
-        if !self.prefs.recovery_journal || s.revision == self.journaled {
+        if !self.prefs.recovery_journal || (s.revision == self.journaled && self.journaled_view.as_ref() == Some(&s.view)) {
             return None;
         }
         let max = self.first_pending.unwrap_or(self.last_change) + Duration::from_secs(self.prefs.recovery_interval_seconds as u64);
@@ -924,6 +1034,13 @@ impl Worker {
                     self.first_pending.get_or_insert(now);
                     self.last_change = now;
                     self.latest = Some(s);
+                }
+                Some(Msg::View(updates)) => {
+                    if ViewUpdates::apply(self.latest.as_mut(), &updates) {
+                        let now = Instant::now();
+                        self.first_pending.get_or_insert(now);
+                        self.last_change = now;
+                    }
                 }
                 Some(Msg::Clean) => {
                     self.latest = None;
@@ -952,6 +1069,8 @@ impl Worker {
                     let _ = ack.send(());
                 }
                 Some(Msg::Stop) => return,
+                #[cfg(test)]
+                Some(Msg::TestAction(action)) => action(),
                 None => {}
             }
             let now = Instant::now();
@@ -975,23 +1094,47 @@ impl Worker {
     fn write_journal(&mut self) {
         let Some(s) = &self.latest else { return };
         let t0 = Instant::now();
-        let bytes = filmcraft_format::encode(&s.project, false);
+        let bytes = filmcraft_format::encode_with_view(&s.project, Some(&s.view), false);
         let serialize_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let t1 = Instant::now();
         let unix = unix_now();
         let mut meta = self.meta.clone();
         meta.saved_unix = unix;
         meta.revision = s.revision;
+        meta.history_revision = Some(s.revision);
         meta.project_name = s.project.name.clone();
         meta.project_path = s.path.clone();
         meta.bytes = bytes.len();
         // Snapshot first, then the meta that makes it a candidate.
-        let r = filmcraft_format::atomic_write(&self.session_dir.join(SNAPSHOT), &bytes)
+        let r = filmcraft_format::check_project_size(bytes.len())
+            .map_err(io::Error::other)
+            .and_then(|_| filmcraft_format::atomic_write(&self.session_dir.join(SNAPSHOT), &bytes))
             .and_then(|_| filmcraft_format::atomic_write(&self.session_dir.join(META), &serde_json::to_vec_pretty(&meta).unwrap_or_default()));
-        let write_ms = t1.elapsed().as_secs_f64() * 1000.0;
         match r {
             Ok(()) => {
+                // Bind history to this journal generation, including identical project states
+                // reached by Undo. An interrupted/failed write must not reuse an older stack.
+                let history = self.session_dir.join(format!("history-{}", s.revision));
+                let current = PathBuf::from(format!("{}.undo", history.to_string_lossy()));
+                // View-only journals share the exact edit/history generation. Rewriting a
+                // potentially large Undo stack during playback would add needless disk load.
+                let history_current = self.journaled == s.revision && self.history_path.as_ref() == Some(&current) && current.is_file();
+                let saved = if history_current { Ok(()) } else { crate::persistent_history::save_snapshot(&s.project, &s.history, &history.to_string_lossy()) };
+                match saved {
+                    Ok(()) => {
+                        if let Some(old) = self.history_path.replace(current.clone()).filter(|old| *old != current)
+                            && let Err(error) = fs::remove_file(old)
+                            && error.kind() != io::ErrorKind::NotFound
+                        {
+                            self.error(format!("Cannot remove older recovery history: {error}"));
+                        }
+                    }
+                    Err(error) => self.error(format!("Recovery project saved, but Undo/Redo history could not be saved: {error}")),
+                }
+                // Include optional history serialization/write time in observed journal latency.
+                let write_ms = t1.elapsed().as_secs_f64() * 1000.0;
                 self.journaled = s.revision;
+                self.journaled_view = Some(s.view.clone());
                 self.first_pending = None;
                 let _ = self.events.send(WorkerEvent::Journaled { revision: s.revision, unix, serialize_ms, write_ms, bytes: bytes.len() });
             }
@@ -1007,7 +1150,11 @@ impl Worker {
     fn clear_journal(&mut self) {
         let _ = fs::remove_file(self.session_dir.join(META));
         let _ = fs::remove_file(self.session_dir.join(SNAPSHOT));
+        if let Some(history) = self.history_path.take() {
+            let _ = fs::remove_file(history);
+        }
         self.journaled = 0;
+        self.journaled_view = None;
     }
 
     fn auto_save(&mut self) -> Result<PathBuf, String> {
@@ -1026,11 +1173,13 @@ impl Worker {
             (None, _) => (self.data_dir.join(names::AUTO_SAVE_DIR), s.project.name.clone()),
         };
         let t0 = Instant::now();
-        let bytes = filmcraft_format::encode(&s.project, false);
+        let bytes = filmcraft_format::encode_with_view(&s.project, Some(&s.view), false);
         let serialize_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let t1 = Instant::now();
         let unix = unix_now();
-        let r = names::write_auto_save(&dir, &name, unix, (self.local_offset)(unix), &bytes, self.prefs.max_versions as usize);
+        let r = filmcraft_format::check_project_size(bytes.len())
+            .map_err(io::Error::other)
+            .and_then(|_| names::write_auto_save(&dir, &name, unix, (self.local_offset)(unix), &bytes, self.prefs.max_versions as usize));
         let write_ms = t1.elapsed().as_secs_f64() * 1000.0;
         match r {
             Ok(path) => {
@@ -1054,5 +1203,86 @@ impl Worker {
                 Err(m)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod view_update_tests {
+    use super::*;
+
+    fn stalled_persistence() -> (Persistence, Receiver<Msg>) {
+        let (tx, rx) = channel();
+        let (_, events) = channel();
+        let persistence = Persistence {
+            data_dir: PathBuf::new(),
+            session_dir: PathBuf::new(),
+            local_offset: |_| 0,
+            candidates: Vec::new(),
+            status: Status::default(),
+            last_sent: None,
+            lock: None,
+            tx,
+            view_updates: None,
+            events,
+            thread: None,
+        };
+        (persistence, rx)
+    }
+
+    #[test]
+    fn stalled_writer_retains_one_view_notification_for_many_playback_updates() {
+        let (mut persistence, rx) = stalled_persistence();
+        persistence.send_dirty(Arc::new(Project::new("View queue")), 1, None, crate::History::default(), filmcraft_project::ProjectView::default());
+        assert!(matches!(rx.try_recv().unwrap(), Msg::Dirty(_)));
+        for i in 1..=10_000 {
+            persistence.send_view(filmcraft_project::ProjectView { active_sequence: Some(filmcraft_project::ItemId(i)), ..Default::default() });
+        }
+        let queued: Vec<_> = rx.try_iter().collect();
+        drop(rx);
+        drop(persistence);
+        assert_eq!(queued.len(), 1, "a stalled writer must not retain a view per playback frame");
+        assert!(matches!(queued.first(), Some(Msg::View(_))));
+    }
+
+    #[test]
+    fn coalesced_view_delivers_latest_value_and_rearms_the_notification() {
+        let (mut persistence, rx) = stalled_persistence();
+        persistence.send_dirty(Arc::new(Project::new("Latest view")), 1, None, crate::History::default(), filmcraft_project::ProjectView::default());
+        let Msg::Dirty(mut snapshot) = rx.try_recv().unwrap() else { panic!("expected snapshot") };
+        for i in 1..=10_000 {
+            persistence.send_view(filmcraft_project::ProjectView { active_sequence: Some(filmcraft_project::ItemId(i)), ..Default::default() });
+        }
+        let Msg::View(updates) = rx.try_recv().unwrap() else { panic!("expected view notification") };
+        assert!(rx.try_recv().is_err());
+        assert!(ViewUpdates::apply(Some(&mut snapshot), &updates));
+        assert_eq!(snapshot.view.active_sequence, Some(filmcraft_project::ItemId(10_000)));
+        persistence.send_view(filmcraft_project::ProjectView { active_sequence: Some(filmcraft_project::ItemId(10_001)), ..Default::default() });
+        let Msg::View(updates) = rx.try_recv().unwrap() else { panic!("expected rearmed notification") };
+        assert!(ViewUpdates::apply(Some(&mut snapshot), &updates));
+        assert_eq!(snapshot.view.active_sequence, Some(filmcraft_project::ItemId(10_001)));
+        assert!(rx.try_recv().is_err());
+        drop(rx);
+    }
+
+    #[test]
+    fn stale_view_notification_cannot_change_a_new_snapshot_and_clean_views_are_ignored() {
+        let (mut persistence, rx) = stalled_persistence();
+        persistence.send_dirty(Arc::new(Project::new("Old project")), 1, None, crate::History::default(), filmcraft_project::ProjectView::default());
+        assert!(matches!(rx.try_recv().unwrap(), Msg::Dirty(_)));
+        persistence.send_view(filmcraft_project::ProjectView { active_sequence: Some(filmcraft_project::ItemId(42)), ..Default::default() });
+        let Msg::View(old_updates) = rx.try_recv().unwrap() else { panic!("expected old notification") };
+        persistence.send_clean();
+        assert!(matches!(rx.try_recv().unwrap(), Msg::Clean));
+        persistence.send_view(filmcraft_project::ProjectView { active_sequence: Some(filmcraft_project::ItemId(43)), ..Default::default() });
+        assert!(rx.try_recv().is_err(), "clean projects must not queue recovery views");
+        persistence.send_dirty(Arc::new(Project::new("New project")), 2, None, crate::History::default(), filmcraft_project::ProjectView::default());
+        let Msg::Dirty(mut snapshot) = rx.try_recv().unwrap() else { panic!("expected new snapshot") };
+        assert!(!ViewUpdates::apply(Some(&mut snapshot), &old_updates));
+        assert_eq!(snapshot.view, filmcraft_project::ProjectView::default());
+        persistence.send_view(filmcraft_project::ProjectView { active_sequence: Some(filmcraft_project::ItemId(44)), ..Default::default() });
+        let Msg::View(updates) = rx.try_recv().unwrap() else { panic!("expected new notification") };
+        assert!(ViewUpdates::apply(Some(&mut snapshot), &updates));
+        assert_eq!(snapshot.view.active_sequence, Some(filmcraft_project::ItemId(44)));
+        drop(rx);
     }
 }

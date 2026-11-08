@@ -184,3 +184,77 @@ fn escape_cancels_the_box_and_restores_the_selection() {
     d.frames(2);
     assert!(d.selected(a) && !d.selected(b), "Escape put back the selection the drag began with");
 }
+
+#[test]
+fn marquee_tool_starts_over_clip_bodies_and_edges_without_editing() {
+    for edge in [false, true] {
+        for modifiers in [egui::Modifiers::NONE, egui::Modifiers::SHIFT, egui::Modifiers::COMMAND, egui::Modifiers::ALT] {
+            let mut d = Driver::demo();
+            let (a, b, ra, rb, _) = d.setup();
+            d.exec("tool.marquee", json!({}));
+            d.exec("timeline.select", json!({"clips": [a]}));
+            let before = serde_json::to_value(&d.harness.state().session.project).unwrap();
+            let start = if edge { egui::pos2(rb.max.x - 2.0, rb.center().y) } else { rb.center() };
+            let end = egui::pos2(ra.center().x, start.y + 4.0);
+            d.modifiers = modifiers;
+            d.send(egui::Event::PointerMoved(start));
+            d.button(start, true);
+            d.move_to(start, end);
+            assert!(d.selected(a) && d.selected(b));
+            d.button(end, false);
+            d.frames(2);
+            assert_eq!(serde_json::to_value(&d.harness.state().session.project).unwrap(), before, "selection never moves, trims, or edits clips");
+            assert!(d.selected(a) && d.selected(b));
+        }
+    }
+}
+
+#[test]
+fn m_adds_a_marker_in_timeline_and_modified_chord_selects_marquee() {
+    let mut d = Driver::demo();
+    d.setup();
+    let export = d.harness.state().session.shortcuts.resolve(
+        &filmcraft_engine::shortcuts::Chord::parse("Cmd+M").unwrap(),
+        Some("Timeline"),
+        filmcraft_engine::shortcuts::Platform::current(),
+    );
+    assert_eq!(export.map(|binding| binding.command.as_str()), Some("mode.export"));
+    let markers_before = d.harness.state().session.active_sequence().unwrap().markers.len();
+    for pressed in [true, false] {
+        d.send(egui::Event::Key { key: egui::Key::M, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE });
+    }
+    assert_eq!(d.harness.state().ui.tool, filmcraft_ui_egui::state::Tool::Selection);
+    assert_eq!(d.harness.state().session.active_sequence().unwrap().markers.len(), markers_before + 1);
+
+    let marquee_chord = if cfg!(target_os = "macos") { "Cmd+Ctrl+M" } else { "Shift+V" };
+    d.ok("ui.key", json!({"key": marquee_chord}));
+    d.frames(2);
+    assert_eq!(d.harness.state().ui.tool, filmcraft_ui_egui::state::Tool::Marquee);
+    assert_eq!(d.harness.state().session.active_sequence().unwrap().markers.len(), markers_before + 1, "Marquee must not add a marker");
+}
+
+#[test]
+fn recorder_dialog_exposes_capture_controls_and_rejects_hostile_windows() {
+    let mut d = Driver::demo();
+    let dir = tempfile::tempdir().unwrap();
+    d.harness.state_mut().session.prefs_path = Some(dir.path().join("preferences.json"));
+    let before = d.harness.state().session.project.clone();
+    assert_eq!(d.exec("diagnostics.toggle", json!({}))["enabled"], true);
+    d.exec("diagnostics.capture", json!({}));
+    d.frames(3);
+    d.rect("diagnostics.capture.30");
+    let report = d.exec("diagnostics.capture", json!({"seconds":30}));
+    assert!(std::path::Path::new(report["path"].as_str().unwrap()).exists());
+    let ctx = d.harness.ctx.clone();
+    for seconds in [json!(-1), json!(0), json!(601), json!("60"), json!(null)] {
+        assert!(filmcraft_ui_egui::menus::invoke(d.harness.state_mut(), &ctx, "diagnostics.capture", json!({"seconds":seconds})).is_err());
+    }
+    // Capture changes the notice text and therefore the window's measured size.
+    // Let the registry settle before resolving the synthetic click coordinates.
+    d.frames(3);
+    d.ok("ui.click", json!({"id":"diagnostics.close"}));
+    d.frames(2);
+    assert!(!d.harness.state().flight_recorder.window_open);
+    assert_eq!(d.exec("diagnostics.toggle", json!({}))["enabled"], false);
+    assert_eq!(*d.harness.state().session.project, *before);
+}

@@ -1,0 +1,8 @@
+asset:        ocrs-models-CC-BY-SA-4.0.txt
+title:        CC BY-SA 4.0 license shipped with optional Ocrs model downloads
+author:       Creative Commons
+source:       https://creativecommons.org/licenses/by-sa/4.0/legalcode.txt
+license:      CC0-1.0
+license-file: ocrs-models-CC-BY-SA-4.0.txt
+added:        2026-11-06 by FilmCraft contributor
+notes:        Creative Commons dedicates the text of its public licenses to CC0 in the closing notice. Verbatim legal code for the OCR weights. Weights are downloaded unmodified from Robert Knight and receive individual attribution sidecars at installation.

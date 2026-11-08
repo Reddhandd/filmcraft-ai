@@ -1,0 +1,19 @@
+{
+  "crate": "wgpu-hal",
+  "version": "30.0.1",
+  "archiveSha256": "b6b7fb58561a792bc237628ba0792e332de418fefe145f13b5ed8201e6d52f58",
+  "license": "MIT OR Apache-2.0",
+  "omittedPublishedFiles": [
+    "Cargo.lock"
+  ],
+  "modifiedPublishedFiles": [
+    "Cargo.toml",
+    "src/metal/surface.rs"
+  ],
+  "addedFiles": [
+    ".gitignore",
+    "FILMCRAFT-PATCH.txt",
+    "FILMCRAFT-PROVENANCE.json"
+  ],
+  "nativeSurfaceSha256": "1cba3efd1faad913fa3091ab0adb90dd5ade6c2534723dbf48edf49f8bed4a38"
+}

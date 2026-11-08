@@ -248,9 +248,11 @@ pub(super) static CATEGORIES: &[Category] = &[
             b("general.showToolTips", "Show Tool Tips", true),
             sub("general.showRichToolTips", "Show Rich Tool Tips", Kind::Bool, "general.showToolTips", false),
             b("general.showWorkspaceResetWarning", "Show Workspace Reset Warning dialog on double click", false),
+            b("general.showPerformanceMatchTrimWarning", "Show Performance Match trim warning", false),
             b("general.showProjectLoadErrors", "Show Project Load Error Dialog", false),
             b("general.showCompatibilityIssues", "Show system compatibility issues at startup", false),
             b("general.showProjectBinInTab", "Show \"Project:\" and \"Bin:\" in Project panel tab", false),
+            b("general.persistentUndo", "Save undo history with project", false),
             b("general.showMaskTrackerPreview", "Show Mask Tracker Preview", false),
         ],
     },
@@ -601,6 +603,15 @@ pub fn field(key: &str) -> Option<Field> {
 
 /// Check a value for `key` against the schema (choices, colours). Ranges are clamped later.
 pub fn validate(key: &str, v: &Value) -> std::result::Result<(), String> {
+    if key == "general.codexVoiceEchoReduction" {
+        return if v.is_boolean() { Ok(()) } else { Err("Codex voice echo reduction must be a boolean".into()) };
+    }
+    if key == "general.codexSpeakingVoice" {
+        return match v.as_str() {
+            Some(id) if id.len() <= 64 && id.bytes().all(|b| b.is_ascii_lowercase() || b == b'-' || b == b'_') => Ok(()),
+            _ => Err("Codex speaking voice must be an identifier of at most 64 lowercase ASCII characters, or empty for default".into()),
+        };
+    }
     if key == "appearance.favoriteThemes" {
         let items = v.as_array().ok_or("favorite themes must be a list")?;
         let mut seen = Vec::new();
@@ -645,6 +656,16 @@ pub fn is_unit_key(key: &str) -> bool {
 /// Repair a preferences value in place against the schema: unknown choices and bad colours go back
 /// to their defaults, numbers are clamped to their ranges.
 pub fn sanitize(v: &mut Value, defaults: &Value) {
+    if let Some(slot) = v.pointer_mut("/general/codexVoiceEchoReduction")
+        && !slot.is_boolean()
+    {
+        *slot = Value::Bool(false);
+    }
+    if let Some(slot) = v.pointer_mut("/general/codexSpeakingVoice")
+        && validate("general.codexSpeakingVoice", slot).is_err()
+    {
+        *slot = Value::String(String::new());
+    }
     if let Some(slot) = v.pointer_mut("/appearance/favoriteThemes")
         && validate("appearance.favoriteThemes", slot).is_err()
     {

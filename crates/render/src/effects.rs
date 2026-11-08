@@ -94,6 +94,34 @@ pub(crate) fn hash3(x: usize, y: usize, z: u64) -> f32 {
     (h >> 40) as f32 / (1u64 << 24) as f32
 }
 
+pub(crate) fn apply_noise(img: &mut Image, amt: f32, grain: f32, colored: bool, clip: bool, frame: u64) {
+    if amt <= 0.0 || img.w == 0 || img.h == 0 {
+        return;
+    }
+    let w = img.w;
+    img.px.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            let p = &mut row[x * 4..x * 4 + 4];
+            let a = p[3];
+            if a <= 0.0 {
+                continue;
+            }
+            let (x, y) = ((x as f32 / grain) as usize, (y as f32 / grain) as usize);
+            let n0 = hash3(x, y, frame) - 0.5;
+            let ns = if colored { [n0, hash3(x, y, frame.wrapping_add(7777)) - 0.5, hash3(x, y, frame.wrapping_add(99_991)) - 0.5] } else { [n0; 3] };
+            let c = enc([p[0] / a, p[1] / a, p[2] / a]);
+            let mut o = [c[0] + ns[0] * amt, c[1] + ns[1] * amt, c[2] + ns[2] * amt];
+            if clip {
+                o = o.map(|v| v.clamp(0.0, 1.0));
+            }
+            let o = dec(o);
+            p[0] = o[0] * a;
+            p[1] = o[1] * a;
+            p[2] = o[2] * a;
+        }
+    });
+}
+
 /// Apply one effect. Unknown/unimplemented ids are a no-op (they still round-trip in the project).
 /// Largest Median radius in source pixels (the parameter's range).
 const MEDIAN_MAX_RADIUS: f32 = 100.0;
@@ -131,33 +159,6 @@ pub fn apply(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
             if r > 0 {
                 median(img, r);
             }
-        }
-        "noise" => {
-            let amt = f(e, "amount", cx) / 100.0;
-            let colored = b(e, "color");
-            let clip = b(e, "clip");
-            let frame = noise_frame_seed(cx);
-            let w = img.w;
-            img.px.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
-                for x in 0..w {
-                    let p = &mut row[x * 4..x * 4 + 4];
-                    let a = p[3];
-                    if a <= 0.0 {
-                        continue;
-                    }
-                    let n0 = hash3(x, y, frame) - 0.5;
-                    let ns = if colored { [n0, hash3(x, y, frame + 7777) - 0.5, hash3(x, y, frame + 99_991) - 0.5] } else { [n0; 3] };
-                    let c = enc([p[0] / a, p[1] / a, p[2] / a]);
-                    let mut o = [c[0] + ns[0] * amt, c[1] + ns[1] * amt, c[2] + ns[2] * amt];
-                    if clip {
-                        o = o.map(|v| v.clamp(0.0, 1.0));
-                    }
-                    let o = dec(o);
-                    p[0] = o[0] * a;
-                    p[1] = o[1] * a;
-                    p[2] = o[2] * a;
-                }
-            });
         }
         "mosaic" => {
             let bx = f(e, "horizontal", cx).max(1.0) as usize;
@@ -664,10 +665,10 @@ fn lumetri(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
         v = v.map(|q| (q - b0) / (w0 - b0).max(1e-3));
         // highlights / shadows: luma-weighted lift/compress, hue preserving
         let l = 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
-        let ws = (1.0 - l).clamp(0.0, 1.0).powi(3);
+        let ws = crate::gpufx::black_anchored_shadow_weight(l);
         let whl = l.clamp(0.0, 1.0).powi(3);
         let nl = (l + sh * 0.35 * ws + hl * 0.35 * whl).max(0.0);
-        if l > 1e-5 {
+        if l > 0.0 {
             let k = nl / l;
             v = v.map(|q| q * k);
         }

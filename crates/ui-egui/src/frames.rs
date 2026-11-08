@@ -9,7 +9,7 @@
 
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -162,7 +162,7 @@ struct Shared {
     /// frames: compositing, CPU effects. Frames cannot be ready sooner than this after they are
     /// started, and the workers can finish at most `workers / cost` of them per second.
     render_cost: Mutex<f64>,
-    workers: usize,
+    workers: AtomicUsize,
     /// Always-on counters for `perf.stats`.
     stats: Mutex<FrameStats>,
     /// Set (under the queue lock) when the [`FrameServer`] is dropped: the workers return.
@@ -413,6 +413,7 @@ pub struct FrameServer {
     pub services: Arc<dyn Services>,
     pub previews: Arc<PreviewStore>,
     repaint: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
+    startup_error: Option<String>,
 }
 
 /// Frames queued ahead of the playhead while playing (and how far ahead a queued job may be
@@ -466,6 +467,7 @@ impl FrameServer {
     }
 
     pub fn new(pool: Arc<MediaPool>, services: Arc<dyn Services>, previews: Arc<PreviewStore>, workers: usize) -> Self {
+        let workers = workers.clamp(1, 32);
         let shared = Arc::new(Shared {
             queue: Mutex::new(VecDeque::new()),
             cv: Condvar::new(),
@@ -475,28 +477,44 @@ impl FrameServer {
             profiling: AtomicBool::new(false),
             records: Mutex::new(Vec::new()),
             render_cost: Mutex::new(0.0),
-            workers: workers.max(1),
+            workers: AtomicUsize::new(0),
             stats: Mutex::new(FrameStats::default()),
             stop: AtomicBool::new(false),
         });
         let repaint: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>> = Arc::new(Mutex::new(None));
+        #[allow(unused_mut)]
+        let mut startup_error = None;
         #[cfg(not(target_arch = "wasm32"))]
-        for i in 0..workers.max(1) {
+        for i in 0..workers {
             let sh = shared.clone();
             let pool = pool.clone();
             let services = services.clone();
             let rp = repaint.clone();
             let pv = previews.clone();
-            std::thread::Builder::new().name(format!("filmcraft-frames-{i}")).spawn(move || worker(sh, pool, services, pv, rp)).ok();
+            match std::thread::Builder::new().name(format!("filmcraft-frames-{i}")).spawn(move || worker(sh, pool, services, pv, rp)) {
+                Ok(_) => {
+                    shared.workers.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    let message = format!("Could not start frame worker: {error}. Frames will use the available workers or run on the UI thread.");
+                    log::error!("{message}");
+                    startup_error = Some(message);
+                    break;
+                }
+            }
         }
         #[cfg(target_arch = "wasm32")]
         let _ = workers;
-        Self { shared, pool, services, previews, repaint }
+        Self { shared, pool, services, previews, repaint, startup_error }
     }
 
     /// The default number of frame workers for this machine.
     pub fn default_workers() -> usize {
         std::thread::available_parallelism().map(|n| n.get().clamp(2, 6)).unwrap_or(3)
+    }
+
+    pub fn startup_error(&self) -> Option<&str> {
+        self.startup_error.as_deref()
     }
 
     pub fn set_context(&self, ctx: &egui::Context) {
@@ -523,7 +541,7 @@ impl FrameServer {
 
     /// Worker threads.
     pub fn workers(&self) -> usize {
-        self.shared.workers
+        self.shared.workers.load(Ordering::Relaxed)
     }
 
     /// (cached images, their bytes, cached GPU plans, their bytes).
@@ -636,7 +654,7 @@ impl FrameServer {
         let dir = if speed < 0.0 { -1 } else { 1 };
         let step = speed.abs().max(1.0) as i64;
         let fps = rate.as_f64() * speed.abs().max(1.0) / step as f64;
-        let (lead, stride) = if preroll { (1, 1) } else { playback_plan(self.render_cost(), fps, self.shared.workers) };
+        let (lead, stride) = if preroll { (1, 1) } else { playback_plan(self.render_cost(), fps, self.workers()) };
         if lead <= 1 {
             // the frame due now; once the clock runs, the frames before it are late
             self.request_job(key, rate.tick_of(key.frame), scale, project, 0, false, (!preroll && dir > 0).then_some(Tick::ZERO));
@@ -710,7 +728,7 @@ impl FrameServer {
     /// priority first, until `budget` has passed (at least one job). Jobs whose media is still
     /// loading go back to the queue. Returns the number of jobs finished. A no-op with workers.
     pub fn pump(&self, budget: Duration) -> usize {
-        if cfg!(not(target_arch = "wasm32")) {
+        if self.workers() > 0 {
             return 0;
         }
         let t0 = Instant::now();
@@ -728,10 +746,18 @@ impl FrameServer {
                     None => break,
                 }
             };
-            if run_job(&self.shared, &job, &self.pool, &self.services, &self.previews) {
-                done += 1;
-            } else {
-                retry.push(job);
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(&self.shared, &job, &self.pool, &self.services, &self.previews))) {
+                Ok(true) => done += 1,
+                Ok(false) => retry.push(job),
+                Err(_) => {
+                    self.shared
+                        .in_flight
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .retain(|(key, cancel, _)| !(*key == job.key && Arc::ptr_eq(cancel, &job.cancel)));
+                    self.shared.stats.lock().unwrap_or_else(|e| e.into_inner()).failed += 1;
+                    log::error!("frame job {:?} failed while running without workers", job.key);
+                }
             }
             if t0.elapsed() >= budget {
                 break;

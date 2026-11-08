@@ -27,6 +27,30 @@ pub const MAX_CONNECTIONS: usize = 16;
 /// A peer that stops sending or reading must eventually give back its connection slot.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// An ordinary desktop launch owns a fresh, unpublished credential and an OS-assigned
+/// loopback port. Keep the listener bound while handing its address to the providers.
+pub fn start_private(ctx: egui::Context) -> Result<(u16, String, Receiver<ControlRequest>), String> {
+    let mut nonce = [0_u8; 32];
+    getrandom::fill(&mut nonce).map_err(|e| format!("Cannot create the private Console credential: {e}"))?;
+    let token: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("Cannot open the private Console connection: {e}"))?;
+    let port = listener.local_addr().map_err(|e| format!("Cannot inspect the private Console connection: {e}"))?.port();
+    let rx = start_listener(listener, ctx, token.clone()).map_err(|e| format!("Cannot start the private Console connection: {e}"))?;
+    Ok((port, token, rx))
+}
+
+fn start_listener(listener: TcpListener, ctx: egui::Context, token: String) -> std::io::Result<Receiver<ControlRequest>> {
+    let (tx, rx) = channel();
+    std::thread::Builder::new().name("control-listener".into()).spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| accept_loop(listener, tx, ctx.clone(), token)));
+        if result.is_err() {
+            log::error!("Console connection worker failed; restart FilmCraft to restore the connection");
+            ctx.request_repaint();
+        }
+    })?;
+    Ok(rx)
+}
+
 pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
     start_with_token(port, ctx, std::env::var("FILMCRAFT_CONTROL_TOKEN").ok())
 }
@@ -47,8 +71,14 @@ fn start_with_token(port: u16, ctx: egui::Context, token: Option<String>) -> Rec
         }
     };
     eprintln!("filmcraft: control server listening on 127.0.0.1:{port}");
-    std::thread::spawn(move || accept_loop(listener, tx, ctx, token));
-    rx
+    drop(tx);
+    match start_listener(listener, ctx, token) {
+        Ok(receiver) => receiver,
+        Err(error) => {
+            eprintln!("filmcraft: control server could not start: {error}");
+            rx
+        }
+    }
 }
 
 fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context, token: String) {

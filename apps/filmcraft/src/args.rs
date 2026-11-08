@@ -152,6 +152,12 @@ fn graphics_mode(name: &str) -> Result<crate::graphics::Mode, String> {
     Ok(mode)
 }
 
+/// Private acceptance hosts can isolate policy without changing HOME or the default
+/// cross-build user lock. This is a host launch setting, never an MCP parameter.
+pub(crate) fn session_lock_path(override_file: Option<OsString>, user_data: Option<PathBuf>) -> Option<PathBuf> {
+    override_file.filter(|path| !path.is_empty()).map(PathBuf::from).or_else(|| user_data.map(|root| root.join("Console/codex-session-lock.json")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +328,13 @@ mod tests {
         assert!(parse_args(&["--graphics", "DEFAULT"]).is_err());
         assert!(parse_args(&["--graphics", &"x".repeat(1 << 16)]).is_err());
         assert!(USAGE.contains("--graphics"));
+    }
+    #[test]
+    fn private_session_policy_override_preserves_default_cross_build_location() {
+        let owner = PathBuf::from("owner-data");
+        assert_eq!(session_lock_path(None, Some(owner.clone())), Some(owner.join("Console/codex-session-lock.json")));
+        assert_eq!(session_lock_path(Some(OsString::new()), Some(owner.clone())), Some(owner.join("Console/codex-session-lock.json")));
+        assert_eq!(session_lock_path(Some("private-test/policy.json".into()), Some(owner)), Some(PathBuf::from("private-test/policy.json")));
+        assert_eq!(session_lock_path(None, None), None);
     }
 }

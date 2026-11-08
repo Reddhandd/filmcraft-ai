@@ -29,8 +29,10 @@ pub mod mixer;
 pub mod monitor;
 pub mod monitor_view;
 pub mod multicam;
+pub mod music_analysis;
 pub mod notes;
 pub mod panel_state;
+pub mod performance_match;
 pub mod presets;
 pub mod project;
 pub mod project_dialogs;
@@ -71,6 +73,17 @@ pub fn left_text(d: std::time::Duration) -> String {
 /// [`left_text`] for a job or queue item whose JSON has `etaSeconds`, nothing while it is null.
 pub fn eta_suffix(job: &serde_json::Value) -> String {
     job["etaSeconds"].as_f64().and_then(|s| std::time::Duration::try_from_secs_f64(s).ok()).map(left_text).unwrap_or_default()
+}
+
+/// Media-unit completion is distinct from container flush and file publication.
+pub fn job_progress_text(label: &str, progress: &filmcraft_export::Progress) -> String {
+    if progress.phase() == filmcraft_export::ProgressPhase::Finalizing {
+        return tl!("Finalizing…").to_string();
+    }
+    let verb = if label.starts_with("Rendering") { crate::i18n::t(label).to_string() } else { tl!("Exporting").to_string() };
+    let fraction = progress.fraction().clamp(0.0, 1.0);
+    let left = progress.eta().map(left_text).unwrap_or_default();
+    format!("{verb}… {:.0}%{left}", fraction * 100.0)
 }
 
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect) {

@@ -1,5 +1,12 @@
 //! The MCP server. Tool names are snake_case.
 
+#[path = "console_controller.rs"]
+mod console_controller;
+#[path = "controller.rs"]
+mod controller;
+pub use console_controller::FilmcraftConsoleMcp;
+pub use controller::{FilmcraftControllerMcp, FilmcraftMarkerControllerMcp};
+
 use std::sync::{Arc, Mutex, PoisonError};
 
 use base64::Engine as _;
@@ -188,6 +195,19 @@ fn fail(e: impl std::fmt::Display) -> CallToolResult {
 fn png_result(png: &[u8], note: &str) -> CallToolResult {
     CallToolResult::success(vec![Content::image(base64::engine::general_purpose::STANDARD.encode(png), "image/png"), Content::text(note.to_string())])
 }
+fn inline_capture_result(mut value: Value) -> CallToolResult {
+    let Some(object) = value.as_object_mut() else { return fail("FilmCraft returned invalid screenshot metadata") };
+    let Some(encoded) = object.remove("pngBase64").and_then(|v| v.as_str().map(str::to_owned)) else { return fail("FilmCraft returned no image pixels") };
+    if encoded.len() > 350 * 1024 || !["width", "height"].iter().all(|key| object.get(*key).and_then(Value::as_u64).is_some_and(|v| (1..=4096).contains(&v))) {
+        return fail("FilmCraft screenshot exceeds its delivery budget or has invalid dimensions");
+    }
+    let Ok(png) = base64::engine::general_purpose::STANDARD.decode(&encoded) else { return fail("FilmCraft returned malformed screenshot pixels") };
+    if png.len() > 256 * 1024 || !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return fail("FilmCraft returned an invalid or oversized PNG screenshot");
+    }
+    CallToolResult::success(vec![Content::image(encoded, "image/png"), Content::text(value.to_string())])
+}
+
 fn wrap(r: Result<Value, AutomationError>) -> Result<CallToolResult, McpError> {
     Ok(match r {
         Ok(v) => ok_json(&v),
@@ -566,31 +586,40 @@ impl FilmcraftMcp {
 }
 
 impl FilmcraftMcp {
-    async fn screenshot(&self, b: &BridgeClient, panel: Option<String>, max: u32) -> Result<CallToolResult, McpError> {
-        // The desktop bridge needs a pathname, so use a freshly-created,
-        // owner-only directory rather than exposing image bytes at a
-        // predictable shared-temp filename.
-        let dir = match tempfile::tempdir() {
-            Ok(dir) => dir,
-            Err(e) => return Ok(fail(format!("screenshot: {e}"))),
-        };
-        let path = dir.path().join("screenshot.png");
-        if let Err(e) = b.call("ui.screenshot", json!({"path": path.to_string_lossy(), "panel": panel})).await {
-            return Ok(fail(e));
+    #[cfg(test)]
+    pub(super) async fn capture_panel(&self, panel: &str, max: u32) -> Result<CallToolResult, McpError> {
+        match &*self.backend {
+            Backend::Bridge(bridge) => self.screenshot(bridge, Some(panel.into()), max).await,
+            Backend::Headless(_) => Ok(fail("Timeline capture requires the live FilmCraft app; no waveform image was captured")),
         }
-        let bytes = match tokio::fs::read(&path).await {
-            Ok(b) => b,
-            Err(e) => return Ok(fail(format!("screenshot: {e}"))),
-        };
-        let bytes = match image::load_from_memory(&bytes) {
-            Ok(img) => {
-                let rgba = img.to_rgba8();
-                let (w, h) = rgba.dimensions();
-                png_rgba(w, h, rgba.into_raw(), max).unwrap_or(bytes)
-            }
-            Err(_) => bytes,
-        };
-        Ok(png_result(&bytes, "screenshot of the live FilmCraft window"))
+    }
+    pub(crate) async fn capture_timeline_panel(&self, max: u32, range: Option<[i64; 2]>) -> Result<CallToolResult, McpError> {
+        if range.is_some_and(|[start, end]| start < 0 || start >= end) {
+            return Ok(fail("range requires 0 <= start < end"));
+        }
+        match &*self.backend {
+            Backend::Bridge(bridge) => self.screenshot_range(bridge, Some("Timeline".into()), max, range).await,
+            Backend::Headless(_) => Ok(fail("Timeline capture requires the live FilmCraft app; no waveform image was captured")),
+        }
+    }
+    pub(crate) async fn capture_source_panel(&self, max: u32) -> Result<CallToolResult, McpError> {
+        match &*self.backend {
+            Backend::Bridge(bridge) => self.screenshot_range(bridge, Some("Source".into()), max, None).await,
+            Backend::Headless(_) => Ok(fail("Source capture requires the live FilmCraft app; no Source image was captured")),
+        }
+    }
+    async fn screenshot(&self, b: &BridgeClient, panel: Option<String>, max: u32) -> Result<CallToolResult, McpError> {
+        self.screenshot_range(b, panel, max, None).await
+    }
+    async fn screenshot_range(&self, b: &BridgeClient, panel: Option<String>, max: u32, range: Option<[i64; 2]>) -> Result<CallToolResult, McpError> {
+        if !(64..=4096).contains(&max) {
+            return Ok(fail("max_side must be an integer from 64 to 4096"));
+        }
+        // Image delivery needs no tempfile, so a full temp volume cannot prevent capture setup.
+        match b.call("ui.screenshot.inline", json!({"inline":true,"panel":panel,"maxSide":max,"range":range})).await {
+            Ok(value) => Ok(inline_capture_result(value)),
+            Err(error) => Ok(fail(error)),
+        }
     }
 }
 

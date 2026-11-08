@@ -383,3 +383,32 @@ async fn doc_inspect_handles_an_active_sequence_id_above_i64_max() {
     assert_eq!(v["project"]["activeSequence"].as_u64(), Some(HUGE), "{v}");
     assert_eq!(v["sequence"]["id"].as_u64(), Some(HUGE), "an id above i64::MAX must still be inspected, not dropped to a null sequence: {v}");
 }
+
+#[test]
+fn inline_capture_result_contains_actual_image_blocks_and_rejects_bad_payloads() {
+    let png = png_rgba(2, 2, vec![255; 16], 0).unwrap();
+    let value =
+        json!({"pngBase64":base64::engine::general_purpose::STANDARD.encode(png),"width":2,"height":2,"revision":7,"activeSequence":4,"retainedFiles":0});
+    let result = inline_capture_result(value.clone());
+    assert_ne!(result.is_error, Some(true));
+    let content = serde_json::to_value(result.content).unwrap();
+    assert_eq!(content[0]["type"], "image");
+    assert_eq!(content[0]["mimeType"], "image/png");
+    let metadata: Value = serde_json::from_str(content[1]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(metadata["revision"], 7);
+    assert_eq!(metadata["activeSequence"], 4);
+    assert!(metadata.get("pngBase64").is_none());
+    for bad in [json!({}), json!({"pngBase64":"not a PNG","width":2,"height":2}), json!({"pngBase64":"a".repeat(400_000),"width":2,"height":2})] {
+        assert_eq!(inline_capture_result(bad).is_error, Some(true));
+    }
+    let mut bad = value;
+    bad["width"] = json!(u64::MAX);
+    assert_eq!(inline_capture_result(bad).is_error, Some(true));
+}
+
+#[tokio::test]
+async fn headless_timeline_capture_reports_missing_live_pixels() {
+    let result = FilmcraftMcp::headless(demo()).capture_panel("Timeline", 1600).await.unwrap();
+    assert_eq!(result.is_error, Some(true));
+    assert!(!serde_json::to_string(&result.content).unwrap().contains("image/png"));
+}

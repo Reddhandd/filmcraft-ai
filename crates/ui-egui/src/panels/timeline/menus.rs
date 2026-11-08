@@ -127,6 +127,15 @@ pub(super) fn edit_point_menu(app: &mut FilmcraftApp, ctx: &egui::Context, ui: &
         }
         ui.close();
     }
+    let label = tl!("Paste Transition");
+    let r = ui.add_enabled(app.session.state.clipboard_transition.is_some(), egui::Button::new(label));
+    app.auto.add("timeline.editPointMenu.pasteTransition", r.rect, label);
+    if r.clicked() {
+        if let Err(error) = crate::menus::invoke(app, ctx, "edit.paste", json!({})) {
+            app.ui.status = error;
+        }
+        ui.close();
+    }
     // only this cut (and its linked partners), and only when it is a through edit
     let through = filmcraft_edit::through::through_edits(seq).iter().any(|e| Some(e.left) == target.left && Some(e.right) == target.right);
     let label = tl!("Join Through Edits");
@@ -196,5 +205,27 @@ pub(super) fn multicam_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, picked: &
             app.ui.status = e.to_string();
         }
         ui.close();
+    }
+}
+
+/// A right-clicked transition is a cut destination as well as a copy source.
+pub(super) fn transition_menu(app: &mut FilmcraftApp, ctx: &egui::Context, ui: &mut egui::Ui) {
+    let label = tl!("Change Transition…");
+    let edit = ui.button(label);
+    app.auto.add("timeline.transitionMenu.editSettings", edit.rect, label);
+    if edit.clicked() {
+        app.show_panel(crate::dock::PanelKind::EffectControls);
+        ui.close();
+    }
+    ui.separator();
+    for (label, id) in [(tl!("Copy Transition"), "edit.copy"), (tl!("Paste Transition"), "edit.paste")] {
+        let r = ui.add_enabled(app.session.is_enabled(id), egui::Button::new(label));
+        app.auto.add(&format!("timeline.transitionMenu.{id}"), r.rect, label);
+        if r.clicked() {
+            if let Err(error) = crate::menus::invoke(app, ctx, id, json!({})) {
+                app.ui.status = error;
+            }
+            ui.close();
+        }
     }
 }

@@ -75,6 +75,7 @@ pub fn export(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, so
 /// [`export`] on the threads it is called from.
 fn export_here(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, sources: &dyn SourceProvider, progress: &Progress) -> Result<Report> {
     settings.validate()?;
+    progress.set_phase(crate::ProgressPhase::Processing);
     if stepped(settings.format) {
         let mut ex = Exporter::new(project.clone(), seq, settings, progress)?;
         loop {
@@ -140,6 +141,7 @@ fn export_here(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, s
                     progress.done.fetch_add(1, Ordering::Relaxed);
                 }
             }
+            progress.set_phase(crate::ProgressPhase::Finalizing);
             match &mut writer {
                 AudioWriter::Pcm(_) => out.write_all(pcm::pad(frames, ch, fmt)).map_err(io)?,
                 AudioWriter::Flac(enc) => {
@@ -212,6 +214,7 @@ fn export_here(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, s
                 progress.done.fetch_add((end - f) as u64, Ordering::Relaxed);
                 f = end;
             }
+            progress.set_phase(crate::ProgressPhase::Finalizing);
             if let Some(enc) = gif {
                 let buf = gif_buf.clone();
                 drop(enc);

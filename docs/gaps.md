@@ -1,6 +1,24 @@
 # Where FilmCraft falls short of Premiere Pro
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (new file: ROADMAP's "Where we are lacking" re-measured against Premiere Pro 26.5.2 and the open issue list) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+Current execution follows the owner-approved alpha scope in [the roadmap](../ROADMAP.md):
+stability and the requested Console workflows. Premiere project import and broader portability
+are on hold until explicit owner confirmation. Playback is accepted for alpha, with the difficult
+four-view stress case tracked for later. Use these decisions when selecting work from this gap
+inventory.
+
+2026-10-29 local audit: use current implementation and qualification records when choosing work.
+The numeric readiness/effort estimates remain the historical 2026-10-10 assessment. AVI import,
+the three-platform PR workflow, catalogue parity tooling and native-console workflow acceptance
+exist now; their remaining fidelity/runtime/corpus limits should not be counted as missing code.
+Worker/persistence failure handling, identity boundaries, bounded reads, mutation transport and
+transaction repairs passed the combined local gate and native/MCP smoke. Coverage limits remain
+explicit in [testing](testing.md#consolidated-main-validation-2026-10-29). No readiness increase is claimed.
+
+- 2026-10-29 console qualification: the separate `filmcraft-console/3` build passed real-Codex import/sequence placement, playhead/selection, direct grouped edits and Undo/Redo, full-song candidate analysis and Beat Cuts, first-save continuity, reconnect, actual Resume-picker use after restart and an eight-second export decoding all 240 frames. Routine edits need no Apply/Reject. Musical match application/phrase/boundary/drift acceptance and a full-song render remain unverified; no readiness-percentage or release-stage change. See G12 and [testing](testing.md#local-codex-console-qualification).
+
+- 2026-10-25 custom-workflow migration in validation: dedicated Marquee, Timeline Return to Zero, Option-middle zoom, Tools shortcut-editor access, guarded Close All Projects, opt-in persistent Undo and local Flight Recorder. No readiness percentage or release-stage change is claimed. Worker lifecycle/resource-exhaustion repairs are included in validation.
+
+> **Last reviewed:** 2026-10-29 (implementation audit; parity estimates 2026-10-10) · **Last updated:** 2026-10-31 · **Change:** major (local consolidation, safety boundaries and current qualification evidence) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 Every known shortfall, one entry each, ranked by what most stops an editor using FilmCraft for real
 work. This is the work list: agents should prefer it over adding checklist items. Numbers are in
@@ -17,7 +35,7 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 | G1 | Nothing compares our output with Premiere's | measurement | no, but every ready number depends on it | 40–70 h |
 | G2 | Premiere's `.prproj` cannot be opened | file format | **yes** | 60–120 h |
 | G3 | 10-bit and 4:2:2 camera media needs hardware | codec | yes | 30–50 h |
-| G4 | Crashes at start-up, and no test CI on pull requests | stability | yes | 40–80 h |
+| G4 | Launch crashes and cross-platform PR CI | stability | yes | 40–80 h |
 | G5 | Hardware acceleration is partial | hardware | partly | 120–200 h |
 | G6 | No real-world media corpus or workflow acceptance tests | measurement | yes | 40–70 h |
 | G7 | No measured parity tool in CI | measurement | no | 10–20 h |
@@ -77,7 +95,7 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 - **Estimate:** H.264 High 10 + High 4:2:2 (chroma geometry, deblocking, transforms) 15–25 h;
   HEVC Main 4:2:2 10 (RExt subset) 15–25 h. Doc: [codec-parity.md](codec-parity.md).
 
-## G4. Crashes at start-up, and no test CI on pull requests
+## G4. Launch crashes and cross-platform PR CI
 
 - **Have:** a graphics start-up fallback (#820): after two starts in a row that died within 15 s
   of launch without painting (a driver crash in wgpu instance / device creation; hangs, later
@@ -87,14 +105,17 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
   shows a notice with Use Default Graphics; `--graphics default|dx12|software` picks a mode by
   hand. An explicit `WGPU_BACKEND` stays in charge. On Windows, a GPU that Vulkan lists through two
   installed versions of one driver (GPUs on different driver packages) draws with the newer one
-  instead of dying inside the stale one (`filmcraft_gpu::adapter`).
-- **Missing:** a launch that never fails, and CI that runs the gates.
+  instead of dying inside the stale one (`filmcraft_gpu::adapter`). The PR workflow runs the full
+  `cargo xtask ci` gate on Ubuntu, macOS Intel and Windows with Nextest process isolation and at
+  most two concurrent tests per runner.
+- **Missing:** confirmed live runner results and launch/runtime acceptance on the affected hardware;
+  complete fault-injection coverage for worker failures and resource limits.
 - **Evidence:** open issues: macOS 12 Monterey aborts on a missing VideoToolbox symbol (#468,
   #661, #655), Intel UHD graphics (`igvk64.dll`, #512), Windows 11 does not run or fails after setup
   (#380, #582, #413, #477), crash on new project + import (#439), "it just keeps crashing" (#687).
-  `.github/workflows/` holds release, packaging lint, FreeBSD and Windows ARM64 builds; **none runs
-  `cargo test` or `cargo xtask ci` on a pull request**, so 243 PRs merged since 10-05 were gated by
-  contributors' local runs (main needed "green again after the batch merges" on 10-10).
+  Earlier pull requests lacked the full gate; `.github/workflows/ci.yml` now defines the same gate
+  for all three desktop operating systems. Runner results are needed before treating a platform
+  as verified.
 - **Impact:** a user who cannot start the app gets zero value; regressions land unnoticed.
 - **Done when:** weak-linked or runtime-loaded OS symbols on old macOS, ~~a software / safe-mode
   start when the GPU adapter fails~~ (done, #820), a PR workflow running `cargo xtask ci`
@@ -212,6 +233,84 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 - **Needs:** an owner decision (FFI under the `unsafe` rule, AGENTS.md §0.3). **200–400 h.**
 
 ## G12. AI features
+
+The initial `filmcraft-console/4` development implementation adds text/PDF/PNG references and
+reviewed, reusable chat-derived style presets. Local real-Codex qualification verified reference
+reading, image interpretation, fresh-project preset loading, style-guided edits, explicit-request
+precedence and Undo. Project-switch context refresh has regression coverage. General audio
+listening still requires qualified provider authentication; project/range references expose only
+metadata. See [qualification and limits](testing.md#console-references-and-styles-2026-10-29).
+
+
+### Priority: voice expiry and failed reconnect recovery (2026-10-30)
+
+Owner confirmed this as a top stability priority. Reported sequence: voice reaches the one-hour
+limit and disconnects; reconnect briefly succeeds, disconnects again, then refuses to start.
+The voice reconnect control becomes disabled, and disconnecting/reconnecting Codex does not
+restore voice. The original incident has not been reproduced end to end; source defects and an accelerated
+expiry/restart path are now qualified as described below.
+
+Investigate retained logs, voice worker cleanup, stopping/started state transitions, and UI
+control enablement across timeout, failed restart and Codex reconnect. FilmCraft currently
+implements a 3,600-second voice timeout; distinguish that local boundary from provider expiry
+and subsequent recovery failures. Acceptance requires bounded failure reporting, usable retry
+controls and successful voice restart on the intended conversation without replaying edits or
+losing project state. Evaluate advance warning and connection renewal only after confirming the
+supported Codex voice lifecycle. Source repairs passed focused regression and real-provider accelerated lifecycle tests: preserve the shutdown deadline after failure, always stop
+an active remote voice session, and wait for the voice-closed notification before allowing a new peer. A bounded shutdown
+timeout reports that Codex must reconnect when remote closure cannot be confirmed. These are
+confirmed code defects, not proof of the full reported incident cause; physical-device and one-hour endurance qualification remain open. Retained logs also show a retryable `responseStreamDisconnected` notification
+(`Reconnecting... 2/5`) being treated as fatal; protocol-aware retry handling passed regression tests and the combined local gate. See
+[qualification limits](testing.md#voice-expiry-and-provider-retry-recovery-2026-10-30).
+
+### Planned: AI timeline screenshots for waveform inspection (2026-10-30)
+
+Owner-requested roadmap item; implementation is in progress, with packaged acceptance pending. Command Console must be able to
+request and receive screenshots of the timeline, including its displayed audio waveforms, so the
+AI can use the same visual evidence as the editor when assessing transients, silence and alignment.
+Capture should include track/clip identities, visible time range, zoom and project revision so the
+AI can relate pixels to timeline positions and refresh stale observations. Support focused ranges
+and sufficient waveform detail, with bounded image sizes and without requiring a manual attachment.
+
+Validate actual image delivery and interpretation through the Console on a known waveform, and
+verify that capture does not edit the project or disrupt the user's timeline view. Schedule after
+the current graphics-hang/stability work, alongside audio-analysis improvements. Waveform images
+provide visual evidence; they do not establish that the model has listened to the audio.
+
+### Console/controller gaps observed in the attended demo (2026-10-28)
+
+The later `filmcraft-console/3` qualification at `18ac73c8` supersedes the earlier review-ticket-only
+result. Its local `target/command-console-workflow-20261029/qualification.json` and review packet
+record actual import/sequence placement, nonzero playhead/selection, direct grouped edits/Undo/Redo,
+full-song candidate analysis, Beat Cuts (67 clips/278 markers), first-save continuity, reconnect and
+actual Resume-picker use after restart. An eight-second H.264/AAC export decoded all 240 frames.
+The original project and everyday installation were unchanged, voice stayed off and the test app
+released its lease. These private ignored artifacts do not change release readiness.
+
+- **Operating guide and command coverage:** implemented through versioned `console_capabilities`,
+  live native `command_list` and direct `command_run`. Import, sequence authoring, placement,
+  playhead and selection passed live; not every registered command/dialog was individually tested.
+- **Approval-contract mismatch:** corrected for the console. Routine text/spoken edits need no
+  Apply/Reject; `command_batch` groups supported edits atomically into one native Undo step. The
+  separate bounded controller profiles retain preview/commit. Do not restate the historical
+  limited edit subset or nonexistent pending proposal as the current contract.
+- **Memory/session continuity:** later live evidence covers conversations begun before saving,
+  first-save memory/thread continuity, reconnect and actual Resume picker after restart. Fresh
+  project context is loaded; chat history does not reconstruct a discarded unsaved timeline.
+- **Musical analysis:** bounded native music/performance/passages execution and app-owned result
+  application exist, including sections, anchors and reviewed passage trim. Stale/forged results
+  are rejected. Detected beats, suggested sections and candidate scores do not certify downbeats,
+  first audible sound, matching phrases, arrangement identity or boundaries.
+- **Full-song creative acceptance remains open:** live match application and director review of
+  start/middle/end phrases, boundaries, studio-leading-silence, first-beat alignment and drift were
+  not accepted as a finished multicamera edit. Passage trim has only a synthetic regression, and
+  an eight-second delivery check is not a full-song render.
+- **Speech input:** physical channel selection, capture/transmit diagnostics and low-level echo-gate
+  handling replaced the old channel-averaging behavior. The user confirmed Codex voice worked in
+  a later attended demo; a generated-speech test passed returned audio and same-thread MCP inspection
+  without devices. Do not reinstate the earlier mic diagnosis as a current blocker or infer hardware
+  capture from packet counts. Other providers and standalone voice remain future stages.
+
 
 - **Missing:** Object Mask (Premiere 26.0, #406, #694), Generative Extend (needs a large video
   model; not reachable locally), media-intelligence search, caption translation, model-based

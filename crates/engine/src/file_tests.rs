@@ -94,6 +94,33 @@ fn project_is_named_after_its_file() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+#[test]
+fn failed_save_as_preserves_name_path_cleanliness_and_history() {
+    let d = temp_dir("failed-save-as-state");
+    let mut s = demo();
+    let original = d.join("Original.fcproj").to_string_lossy().into_owned();
+    s.execute("file.saveAs", json!({"path": original})).unwrap();
+    let blocked = d.join("blocked");
+    std::fs::write(&blocked, b"a file cannot contain the destination").unwrap();
+    let destination = blocked.join("Wrong name.fcproj").to_string_lossy().into_owned();
+    for dirty in [false, true] {
+        if dirty {
+            s.execute("file.newBin", json!({"name": "Retained"})).unwrap();
+        }
+        let before = s.project.clone();
+        let revisions = (s.revision, s.saved_revision);
+        let history = s.history.clone();
+        assert!(s.execute("file.saveAs", json!({"path": destination})).is_err());
+        assert_eq!(s.project, before);
+        assert_eq!((s.revision, s.saved_revision), revisions);
+        assert_eq!(s.path.as_deref(), Some(original.as_str()));
+        assert_eq!(s.history.undo, history.undo);
+        assert_eq!(s.history.redo, history.redo);
+        assert_eq!(s.is_dirty(), dirty);
+    }
+    std::fs::remove_dir_all(d).unwrap();
+}
+
 /// #1545: `file.newProject` answers with the project it made (name and revision, as
 /// `project_inspect` reports them) instead of `null`.
 #[test]
@@ -127,4 +154,27 @@ fn open_demo_project_clears_saved_path_so_save_does_not_overwrite() {
         "original.fcproj still has the ORIGINAL bin"
     );
     let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn persistent_undo_is_opt_in_and_survives_save_open() {
+    let d = temp_dir("persistent-undo-workflow");
+    let path = d.join("history.fcproj").to_string_lossy().to_string();
+    let mut s = demo();
+    s.execute("file.saveAs", json!({"path": path})).unwrap();
+    assert!(!std::path::Path::new(&format!("{path}.undo")).exists());
+    s.prefs.general.persistent_undo = true;
+    let before = s.project.clone();
+    s.execute("sequence.addEdit", json!({"seconds": 1.0})).unwrap();
+    let after = s.project.clone();
+    s.execute("file.save", json!({})).unwrap();
+    let mut reopened = Session::default();
+    reopened.prefs.general.persistent_undo = true;
+    reopened.execute("file.open", json!({"path": path})).unwrap();
+    assert_eq!(*reopened.project, *after);
+    assert!(reopened.undo().is_some());
+    assert_eq!(*reopened.project, *before);
+    assert!(reopened.redo().is_some());
+    assert_eq!(*reopened.project, *after);
+    std::fs::remove_dir_all(d).unwrap();
 }

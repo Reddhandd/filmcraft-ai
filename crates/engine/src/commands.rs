@@ -130,6 +130,24 @@ fn has_clipboard(s: &Session) -> std::result::Result<(), String> {
     has_seq(s)?;
     if s.state.clipboard.is_empty() && s.state.caption_clipboard.is_empty() { Err("clipboard is empty".into()) } else { Ok(()) }
 }
+fn has_copy_selection(s: &Session) -> std::result::Result<(), String> {
+    has_seq(s)?;
+    if !s.state.selection.is_empty() || !s.state.caption_selection.is_empty() || s.state.transition_selection.len() == 1 {
+        Ok(())
+    } else if s.state.transition_selection.len() > 1 {
+        Err("select one transition to copy".into())
+    } else {
+        Err("nothing selected".into())
+    }
+}
+fn has_paste_clipboard(s: &Session) -> std::result::Result<(), String> {
+    has_seq(s)?;
+    if s.state.clipboard_transition.is_some() || !s.state.clipboard.is_empty() || !s.state.caption_clipboard.is_empty() {
+        Ok(())
+    } else {
+        Err("clipboard is empty".into())
+    }
+}
 
 /// The ids a caller named under `many` (a list) or `one` (a single id), when the command documents
 /// that key as ids (`"clips":[id]`, `"item":id`); `None` when it named none.
@@ -1623,7 +1641,7 @@ fn build() -> Vec<CommandSpec> {
         query!("file.autoSaveStatus", "Auto Save Status", "{}", |s, _| {
             let Some(per) = s.persistence.as_ref() else { return Ok(json!({"running": false, "prefs": s.prefs.auto_save})) };
             Ok(json!({
-                "running": true,
+                "running": per.status.worker_running,
                 "prefs": s.prefs.auto_save,
                 "dataDir": per.data_dir,
                 "sessionDir": per.session_dir,
@@ -1707,14 +1725,29 @@ fn build() -> Vec<CommandSpec> {
             })?;
             Ok(Value::Null)
         }),
-        cmd!("edit.copy", "Copy", ["Edit"], Some("Cmd+C"), "{}", has_clips_or_captions, |s, _| {
+        cmd!("sequence.copyTransition", "Copy Transition", [], None, r#"{"transition":id}"#, has_seq, crate::transition_clipboard::copy),
+        cmd!(
+            "sequence.pasteTransition",
+            "Paste Transition",
+            [],
+            None,
+            r#"{"transition":id?,"cuts":[{"clip":id,"edge":"in|out"}]?}"#,
+            has_seq,
+            crate::transition_clipboard::paste
+        ),
+        cmd!("edit.copy", "Copy", ["Edit"], Some("Cmd+C"), "{}", has_copy_selection, |s, _| {
+            if let Some(id) = s.state.transition_selection.first().copied() {
+                return crate::transition_clipboard::copy(s, &json!({"transition": id.0}));
+            }
             if s.state.selection.is_empty() {
                 return Ok(json!({"copied": crate::captions::copy(s)}));
             }
             copy_selection(s);
             Ok(json!({"copied": s.state.clipboard.len()}))
         }),
-        cmd!("edit.paste", "Paste", ["Edit"], Some("Cmd+V"), "{}", has_clipboard, |s, _| paste(s, false)),
+        cmd!("edit.paste", "Paste", ["Edit"], Some("Cmd+V"), "{}", has_paste_clipboard, |s, _| {
+            if s.state.clipboard_transition.is_some() { crate::transition_clipboard::paste(s, &json!({})) } else { paste(s, false) }
+        }),
         cmd!("edit.pasteInsert", "Paste Insert", ["Edit"], Some("Cmd+Shift+V"), "{}", has_clipboard, |s, _| paste(s, true)),
         cmd!("edit.clear", "Clear", ["Edit"], Some("Backspace"), r#"{"clips":[id]?}"#, has_any_selection, |s, p| {
             if p.get("clips").is_none() && p.get("clip").is_none() && s.state.selection.is_empty() {
@@ -2087,7 +2120,15 @@ fn build() -> Vec<CommandSpec> {
         cmd!("clip.frameHold", "Add Frame Hold", ["Clip", "Video Options"], None, r#"{"clips":[id]?,"time":ticks?}"#, has_seq, |s, p| {
             crate::clip_ops::add_frame_hold(s, p)
         }),
-        cmd!("clip.nest", "Nest…", ["Clip"], None, r#"{"name":str}"#, has_selection, |s, p| nest(s, p)),
+        cmd!(
+            "clip.nest",
+            "Nest…",
+            ["Clip"],
+            None,
+            r#"{"name":str,"clips":[id]?,"controllerSingleNest":bool?,"expectedRevision":u64?,"sequenceId":id?}"#,
+            has_selection,
+            |s, p| nest(s, p)
+        ),
         // Reveal in Project (clip context menu) and Reveal Sequence in Project (Timeline tab menu):
         // select the item in the Project panel and show it there
         cmd!("clip.revealInProject", "Reveal in Project", [], None, r#"{"clip":id?}"#, has_seq, |s, p| {
@@ -2210,7 +2251,7 @@ fn build() -> Vec<CommandSpec> {
             "Apply Video Transition",
             ["Sequence"],
             Some("Cmd+D"),
-            r#"{"clip":id?,"effect":"cross_dissolve|Cross Dissolve|…"?,"frames":i64?,"edge":"in"|"out"?,"params":{param:value}?,"reverse":bool?}"#,
+            r#"{"clip":id?,"effect":"cross_dissolve|Cross Dissolve|…"?,"frames":i64?,"edge":"in"|"out"?,"params":{param:value}?,"reverse":bool?,"expectedRevision":u64?,"sequenceId":id?}"#,
             has_seq,
             |s, p| apply_transition(s, p, TrackKind::Video)
         ),
@@ -2228,7 +2269,7 @@ fn build() -> Vec<CommandSpec> {
             "Edit Transition Settings",
             [],
             None,
-            r#"{"transition":id,"params":{param:value}?,"reverse":bool?,"reset":bool?,"duration":ticks?|"frames":n?,"align":"center"|"start"|"end"?|"start":ticks?,"merge":bool?,"begin":bool?}"#,
+            r#"{"transition":id,"effect":str?,"params":{param:value}?,"reverse":bool?,"reset":bool?,"duration":ticks?|"frames":n?,"align":"center"|"start"|"end"?|"start":ticks?,"merge":bool?,"begin":bool?}"#,
             has_seq,
             set_transition
         ),
@@ -2682,6 +2723,10 @@ fn build() -> Vec<CommandSpec> {
         // Up / Down: edit points on the targeted tracks (Shift+Up / Shift+Down: any track)
         cmd!("playhead.nextEdit", "Go to Next Edit Point", [], Some("Down"), "{}", has_seq, |s, _| crate::keyboard::go_to_edit(s, true, false)),
         cmd!("playhead.prevEdit", "Go to Previous Edit Point", [], Some("Up"), "{}", has_seq, |s, _| crate::keyboard::go_to_edit(s, false, false)),
+        cmd!("playhead.returnToZero", "Return Playhead to Zero", ["Sequence"], None, "{}", has_seq, |s, _| {
+            s.set_playhead(Tick::ZERO);
+            Ok(Value::Null)
+        }),
         cmd!("playhead.start", "Go to Sequence Start", [], Some("Home"), "{}", has_seq, |s, _| {
             s.set_playhead(Tick::ZERO);
             Ok(Value::Null)
@@ -3082,8 +3127,29 @@ fn build() -> Vec<CommandSpec> {
         }),
         // ================= Effects =================
         cmd!("effects.apply", "Apply Effect", [], None, r#"{"clips":[id]?,"effect":"gaussian_blur|Gaussian Blur|…"}"#, has_seq, |s, p| {
+            let controller = p.get("controllerSingleVideoClip").is_some();
+            if let Some(expected) = p.get("expectedRevision") {
+                let expected = expected.as_u64().ok_or_else(|| bad("effects.apply", "invalid expected project revision"))?;
+                if expected != s.revision {
+                    return Err(bad("effects.apply", format!("stale project revision: expected {expected}, current {}", s.revision)));
+                }
+            }
+            if let Some(expected) = p.get("sequenceId") {
+                let expected = expected.as_u64().ok_or_else(|| bad("effects.apply", "invalid sequence identifier"))?;
+                if s.state.active_sequence.map(|id| id.0) != Some(expected) {
+                    return Err(bad("effects.apply", "active sequence changed since preview"));
+                }
+            }
             let name = str_p(p, "effect").ok_or_else(|| bad("effects.apply", "need `effect`"))?;
             let def = resolve_effect_name(s, p, name).ok_or_else(|| bad("effects.apply", format!("unknown effect `{name}`")))?;
+            if controller
+                && (p.get("controllerSingleVideoClip").and_then(Value::as_bool) != Some(true)
+                    || def.kind != filmcraft_project::EffectKind::Video
+                    || def.intrinsic
+                    || def.category.first().copied() != Some("Video Effects"))
+            {
+                return Err(bad("effects.apply", "controller action requires a standard video effect"));
+            }
             if filmcraft_project::graphic::is_layer_id(def.id) {
                 return Err(bad("effects.apply", "graphic layers are added with graphics.newText / graphics.newShape"));
             }
@@ -3095,6 +3161,20 @@ fn build() -> Vec<CommandSpec> {
             let clips = clips_p(s, p);
             if clips.is_empty() {
                 return Err(bad("effects.apply", "select clips first"));
+            }
+            if controller {
+                if p.get("clips").and_then(Value::as_array).is_none_or(|ids| ids.len() != 1 || ids[0].as_u64() != Some(clips[0].0)) {
+                    return Err(bad("effects.apply", "controller action requires exactly one explicit video clip"));
+                }
+                let q = s.active_sequence().ok_or_else(|| bad("effects.apply", "no active sequence"))?;
+                let (track_id, clip) = q.find_item(clips[0]).ok_or_else(|| bad("effects.apply", "video clip missing"))?;
+                let track = q.track(track_id).ok_or_else(|| bad("effects.apply", "video track missing"))?;
+                if track.kind != TrackKind::Video || track.locked || !track.enabled || !clip.enabled {
+                    return Err(bad("effects.apply", "video clip or track is locked or disabled"));
+                }
+                if clip.effects.len() >= 64 {
+                    return Err(bad("effects.apply", "clip has too many effects for a bounded controller edit"));
+                }
             }
             let is_audio = def.kind == filmcraft_project::EffectKind::Audio;
             // Audio effects belong on audio clips. A video clip in an A/V pair is retargeted to
@@ -3135,9 +3215,22 @@ fn build() -> Vec<CommandSpec> {
                 }
                 Ok(applied)
             })?;
-            Ok(json!({"applied": applied}))
+            if controller {
+                let clip = clips.first().copied().ok_or_else(|| bad("effects.apply", "video clip missing"))?;
+                let effect = s
+                    .active_sequence()
+                    .and_then(|q| q.find_item(clip))
+                    .and_then(|(_, item)| item.effects.iter().find(|effect| effect.effect == def.id))
+                    .ok_or_else(|| bad("effects.apply", "applied effect missing"))?;
+                Ok(json!({"clips": applied.len(), "effect": inspected_effect(effect), "applied": applied}))
+            } else {
+                Ok(json!({"applied": applied}))
+            }
         }),
         cmd!("effects.remove", "Remove Effect", [], None, r#"{"clip":id,"index":n}"#, has_seq, |s, p| {
+            if p.get("controllerSingleVideoEffect").is_some() {
+                return remove_controller_video_effect(s, p);
+            }
             let c = clip_p(p, "clip").ok_or_else(|| bad("effects.remove", "need `clip`"))?;
             let idx = u64_p(p, "index").ok_or_else(|| bad("effects.remove", "need `index`"))? as usize;
             // the selected effect: where it is, and its selection once the effect at `idx` is gone
@@ -3183,6 +3276,9 @@ fn build() -> Vec<CommandSpec> {
             r##"{"clip":id,"effect":"motion"|index,"param":str,"mask":n?,"value":num|[x,y]|"#rrggbb"|bool|path|"option name" (a choice takes its index or its name),"time":ticks? (where the keyframe goes when the parameter is animated, kept there even outside the clip; default: the playhead, pinned to the clip; a parameter that is not animated gets a new static value whatever the time),"keyframe":bool? (true: write a keyframe at `time` and animate the parameter),"merge":bool|key?,"begin":bool?}"##,
             has_seq,
             |s, p| {
+                if p.as_object().is_some_and(|o| o.keys().any(|key| key.starts_with("controller"))) {
+                    return set_controller_static_video_param(s, p);
+                }
                 let c = clip_p(p, "clip").ok_or_else(|| bad("effects.setParam", "need `clip`"))?;
                 let pid = str_p(p, "param").ok_or_else(|| bad("effects.setParam", "need `param`"))?.to_string();
                 let val = p.get("value").cloned().ok_or_else(|| bad("effects.setParam", "need `value`"))?;
@@ -3574,6 +3670,18 @@ fn build() -> Vec<CommandSpec> {
             ))
         }),
         query!("project.inspect", "Inspect Project", "{}", |s, _| Ok(crate::commands::inspect_project(s))),
+        query!(
+            "project.inspectPage",
+            "Inspect Project Page",
+            r#"{"offset":uint?,"limit":1..64?,"expectedRevision":uint?}"#,
+            |s, p| crate::inspection::project(s, p)
+        ),
+        query!(
+            "sequence.inspectPage",
+            "Inspect Sequence Page",
+            r#"{"item":id?,"kind":"clips|tracks|markers|selection|effects|parameters|keyframes"?,"track":id?,"clip":id?,"effect":uint?,"param":string?,"offset":uint?,"limit":1..64?,"expectedRevision":uint?}"#,
+            |s, p| crate::inspection::sequence(s, p)
+        ),
         query!("sequence.inspect", "Inspect Sequence", r#"{"item":id?}"#, |s, p| {
             let id = item_p(p, "item").or(s.state.active_sequence).ok_or(EngineError::NoSequence)?;
             let q = s.project.sequence(id).ok_or(EngineError::NoSequence)?;
@@ -3610,6 +3718,9 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::panels::commands());
     v.extend(crate::scopes::commands());
     v.extend(crate::remix::commands());
+    v.extend(crate::performance_match::commands());
+    v.extend(crate::music_analysis::commands());
+    v.extend(crate::consolidate_active::commands());
     v.extend(crate::voiceover::commands());
     v.extend(crate::narration::commands());
     v.extend(crate::keyboard::commands());
@@ -3805,6 +3916,364 @@ fn set_work_area_point(s: &mut Session, p: &Value, is_in: bool) -> Result<Value>
 }
 
 /// Decodes caller JSON using the stored parameter as a type template.
+fn remove_controller_video_effect(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "effects.remove";
+    if p.get("controllerSingleVideoEffect").and_then(Value::as_bool) != Some(true) {
+        return Err(bad(cmd, "controller action requires one explicit video effect"));
+    }
+    let expected_revision = p.get("expectedRevision").and_then(Value::as_u64).ok_or_else(|| bad(cmd, "need a valid expected project revision"))?;
+    if expected_revision != s.revision {
+        return Err(bad(cmd, format!("stale project revision: expected {expected_revision}, current {}", s.revision)));
+    }
+    let expected_sequence = p.get("sequenceId").and_then(Value::as_u64).ok_or_else(|| bad(cmd, "need a valid sequence identifier"))?;
+    if s.state.active_sequence.map(|id| id.0) != Some(expected_sequence) {
+        return Err(bad(cmd, "active sequence changed since preview"));
+    }
+    let clip_id = clip_p(p, "clip").ok_or_else(|| bad(cmd, "need `clip`"))?;
+    let index = p.get("index").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok()).ok_or_else(|| bad(cmd, "need a numeric effect index"))?;
+    let effect_id = str_p(p, "effectId").ok_or_else(|| bad(cmd, "need `effectId`"))?;
+    let q = s.active_sequence().ok_or_else(|| bad(cmd, "no active sequence"))?;
+    let (track_id, clip) = q.find_item(clip_id).ok_or_else(|| bad(cmd, "video clip missing"))?;
+    let track = q.track(track_id).ok_or_else(|| bad(cmd, "video track missing"))?;
+    if track.kind != TrackKind::Video || track.locked || !track.enabled || !clip.enabled {
+        return Err(bad(cmd, "video clip or track is locked or disabled"));
+    }
+    if clip.effects.len() >= 64 {
+        return Err(bad(cmd, "clip has too many effects for a bounded controller edit"));
+    }
+    let effect = clip.effects.get(index).ok_or_else(|| bad(cmd, "effect index missing"))?;
+    if effect.effect != effect_id {
+        return Err(bad(cmd, "effect identity changed since preview"));
+    }
+    let def = effect.def().ok_or_else(|| bad(cmd, "effect definition unavailable"))?;
+    if def.kind != filmcraft_project::EffectKind::Video
+        || def.intrinsic
+        || def.id == "lumetri"
+        || def.category.first().copied() != Some("Video Effects")
+        || filmcraft_project::graphic::is_layer_id(def.id)
+    {
+        return Err(bad(cmd, "controller action requires a standard video effect"));
+    }
+    let removed = effect.clone();
+    s.edit_sequence("Remove Effect", |q, _, _| {
+        let (_, clip) = q.find_item_mut(clip_id).ok_or(filmcraft_edit::EditError::NoItem(clip_id))?;
+        if index >= clip.effects.len() {
+            return Err(bad(cmd, "effect index missing during edit"));
+        }
+        clip.effects.remove(index);
+        Ok(())
+    })?;
+    Ok(json!({"clip":clip_id.0,"effect_index":index,"removed":{
+        "effect":removed.effect,"enabled":removed.enabled,"masks":removed.masks.len(),
+        "params":removed.params.iter().map(|(key,param)| (key.clone(),json!({"value":format!("{:?}",param.value),
+            "keyframes":param.keyframes.len(),"keyframeDetails":param.keyframes.iter().map(|k| json!({"time":k.time.0,"value":format!("{:?}",k.value),"interpolation":format!("{:?}",k.interp)})).collect::<Vec<_>>()}))).collect::<serde_json::Map<_,_>>()}}))
+}
+
+fn set_controller_static_video_param(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "effects.setParam";
+    let flags = [
+        p.get("controllerStaticVideoParam"),
+        p.get("controllerVideoKeyframe"),
+        p.get("controllerExistingVideoKeyframe"),
+        p.get("controllerRemoveVideoKeyframe"),
+        p.get("controllerKeyframeInterpolation"),
+        p.get("controllerMoveVideoKeyframe"),
+    ];
+    let add_keyframe = p.get("controllerVideoKeyframe").and_then(Value::as_bool) == Some(true);
+    let edit_keyframe = p.get("controllerExistingVideoKeyframe").and_then(Value::as_bool) == Some(true);
+    let remove_keyframe = p.get("controllerRemoveVideoKeyframe").and_then(Value::as_bool) == Some(true);
+    let set_interpolation = p.get("controllerKeyframeInterpolation").and_then(Value::as_bool) == Some(true);
+    let move_keyframe = p.get("controllerMoveVideoKeyframe").and_then(Value::as_bool) == Some(true);
+    let keyframe = add_keyframe || edit_keyframe || remove_keyframe || set_interpolation || move_keyframe;
+    if flags.iter().filter(|flag| flag.is_some()).count() != 1
+        || flags.iter().filter(|flag| flag.and_then(Value::as_bool) == Some(true)).count() != 1
+        || p.get("mask").is_some()
+        || p.get("time").is_some()
+    {
+        return Err(bad(cmd, "controller action requires one explicit video effect parameter mode"));
+    }
+    let expected_revision = p.get("expectedRevision").and_then(Value::as_u64).ok_or_else(|| bad(cmd, "need a valid expected project revision"))?;
+    if expected_revision != s.revision {
+        return Err(bad(cmd, format!("stale project revision: expected {expected_revision}, current {}", s.revision)));
+    }
+    let expected_sequence = p.get("sequenceId").and_then(Value::as_u64).ok_or_else(|| bad(cmd, "need a valid sequence identifier"))?;
+    if s.state.active_sequence.map(|id| id.0) != Some(expected_sequence) {
+        return Err(bad(cmd, "active sequence changed since preview"));
+    }
+    let clip_id = clip_p(p, "clip").ok_or_else(|| bad(cmd, "need `clip`"))?;
+    let index = p.get("effect").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok()).ok_or_else(|| bad(cmd, "need a numeric effect index"))?;
+    let effect_id = str_p(p, "effectId").ok_or_else(|| bad(cmd, "need `effectId`"))?;
+    let param_id = str_p(p, "param").ok_or_else(|| bad(cmd, "need `param`"))?;
+    let value = if remove_keyframe || set_interpolation || move_keyframe {
+        if p.get("value").is_some() {
+            return Err(bad(cmd, "keyframe removal, interpolation, or move cannot supply a new value"));
+        }
+        None
+    } else {
+        Some(p.get("value").ok_or_else(|| bad(cmd, "need `value`"))?)
+    };
+    let interpolation = if set_interpolation {
+        Some(match str_p(p, "interpolation") {
+            Some("Linear") => filmcraft_project::Interpolation::Linear,
+            Some("Bezier") => filmcraft_project::Interpolation::Bezier,
+            Some("AutoBezier") => filmcraft_project::Interpolation::AutoBezier,
+            Some("ContinuousBezier") => filmcraft_project::Interpolation::ContinuousBezier,
+            Some("Hold") => filmcraft_project::Interpolation::Hold,
+            Some("EaseIn") => filmcraft_project::Interpolation::EaseIn,
+            Some("EaseOut") => filmcraft_project::Interpolation::EaseOut,
+            _ => return Err(bad(cmd, "unknown keyframe interpolation")),
+        })
+    } else {
+        if p.get("interpolation").is_some() || (!move_keyframe && p.get("expectedInterpolation").is_some()) {
+            return Err(bad(cmd, "interpolation fields require the interpolation mode"));
+        }
+        None
+    };
+    let q = s.active_sequence().ok_or_else(|| bad(cmd, "no active sequence"))?;
+    let (track_id, clip) = q.find_item(clip_id).ok_or_else(|| bad(cmd, "video clip missing"))?;
+    let track = q.track(track_id).ok_or_else(|| bad(cmd, "video track missing"))?;
+    if track.kind != TrackKind::Video || track.locked || !track.enabled || !clip.enabled {
+        return Err(bad(cmd, "video clip or track is locked or disabled"));
+    }
+    let media_time = if keyframe {
+        let relative = p.get("clipTime").and_then(Value::as_i64).ok_or_else(|| bad(cmd, "keyframe requires integer clip-relative time"))?;
+        if relative < 0 || relative >= clip.duration.0 || clip.speed != 1.0 || clip.reverse || clip.frame_hold.is_some() {
+            return Err(bad(cmd, "keyframe requires a forward, normal-speed clip and a time inside it"));
+        }
+        let media_time = clip.source_in.0.checked_add(relative).ok_or_else(|| bad(cmd, "keyframe media time overflows"))?;
+        if p.get("expectedMediaTime").and_then(Value::as_i64) != Some(media_time) {
+            return Err(bad(cmd, "clip source time changed since preview"));
+        }
+        Some(Tick(media_time))
+    } else {
+        if p.get("clipTime").is_some() || p.get("expectedMediaTime").is_some() {
+            return Err(bad(cmd, "static parameter edit cannot contain keyframe time"));
+        }
+        None
+    };
+    let to_media_time = if move_keyframe {
+        let relative = p.get("toClipTime").and_then(Value::as_i64).ok_or_else(|| bad(cmd, "keyframe move requires integer destination clip-relative time"))?;
+        if relative < 0 || relative >= clip.duration.0 {
+            return Err(bad(cmd, "keyframe destination is outside the clip"));
+        }
+        let destination = clip.source_in.0.checked_add(relative).ok_or_else(|| bad(cmd, "keyframe destination media time overflows"))?;
+        if p.get("expectedToMediaTime").and_then(Value::as_i64) != Some(destination) {
+            return Err(bad(cmd, "clip destination source time changed since preview"));
+        }
+        let from = media_time.ok_or_else(|| bad(cmd, "keyframe source time missing"))?;
+        if destination == from.0 {
+            return Err(bad(cmd, "keyframe is already at the destination time"));
+        }
+        Some(Tick(destination))
+    } else {
+        if p.get("toClipTime").is_some() || p.get("expectedToMediaTime").is_some() {
+            return Err(bad(cmd, "destination time requires keyframe move mode"));
+        }
+        None
+    };
+    if clip.effects.len() >= 64 {
+        return Err(bad(cmd, "clip has too many effects for a bounded controller edit"));
+    }
+    let effect = clip.effects.get(index).ok_or_else(|| bad(cmd, "effect index missing"))?;
+    if effect.effect != effect_id || !effect.enabled || !effect.masks.is_empty() {
+        return Err(bad(cmd, "effect changed or is disabled or masked"));
+    }
+    let def = effect.def().ok_or_else(|| bad(cmd, "effect definition unavailable"))?;
+    if def.kind != filmcraft_project::EffectKind::Video
+        || def.intrinsic
+        || def.id == "lumetri"
+        || def.category.first().copied() != Some("Video Effects")
+        || filmcraft_project::graphic::is_layer_id(def.id)
+    {
+        return Err(bad(cmd, "controller action requires a standard video effect"));
+    }
+    let parameter = def.param(param_id).ok_or_else(|| bad(cmd, "effect parameter unavailable"))?;
+    if keyframe && (!parameter.animatable || !matches!(parameter.kind, filmcraft_project::ParamKind::Float { .. })) {
+        return Err(bad(cmd, "this keyframe action requires an animatable numeric slider"));
+    }
+    let chosen = if remove_keyframe || set_interpolation || move_keyframe {
+        None
+    } else {
+        Some(match &parameter.kind {
+            filmcraft_project::ParamKind::Float { min, max, .. } => {
+                let value = value.ok_or_else(|| bad(cmd, "need `value`"))?;
+                let number = value.as_f64().filter(|v| v.is_finite()).ok_or_else(|| bad(cmd, "numeric slider requires a finite number"))?;
+                if number < *min || number > *max {
+                    return Err(bad(cmd, format!("parameter value must be between {min} and {max}")));
+                }
+                ParamValue::Float(number)
+            }
+            filmcraft_project::ParamKind::Bool => {
+                let value = value.ok_or_else(|| bad(cmd, "need `value`"))?;
+                ParamValue::Bool(value.as_bool().ok_or_else(|| bad(cmd, "switch parameter requires true or false"))?)
+            }
+            filmcraft_project::ParamKind::Choice(options) => {
+                let value = value.ok_or_else(|| bad(cmd, "need `value`"))?;
+                let index = value.as_u64().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| bad(cmd, "menu choice requires a numeric option index"))?;
+                if index >= options.len() {
+                    return Err(bad(cmd, "menu option index is outside the effect definition"));
+                }
+                ParamValue::Choice(u32::try_from(index).map_err(|_| bad(cmd, "menu option index is too large"))?)
+            }
+            _ => return Err(bad(cmd, "controller action requires a static slider, switch, or menu choice")),
+        })
+    };
+    let current = effect.params.get(param_id).ok_or_else(|| bad(cmd, "effect parameter missing"))?;
+    if !edit_keyframe && !remove_keyframe && !set_interpolation && !move_keyframe && p.get("expectedKeyframeValue").is_some() {
+        return Err(bad(cmd, "only an existing-keyframe edit accepts an expected keyframe value"));
+    }
+    if move_keyframe {
+        if current.keyframes.is_empty()
+            || current.keyframes.len() > 64
+            || current.keyframes.windows(2).any(|pair| pair[0].time >= pair[1].time)
+            || !matches!(&current.value, ParamValue::Float(value) if value.is_finite())
+        {
+            return Err(bad(cmd, "keyframe move requires 1–64 ordered numeric keyframes"));
+        }
+        let from = media_time.ok_or_else(|| bad(cmd, "keyframe source time missing"))?;
+        let to = to_media_time.ok_or_else(|| bad(cmd, "keyframe destination time missing"))?;
+        let mut matches = current.keyframes.iter().filter(|point| point.time == from);
+        let point = matches.next().ok_or_else(|| bad(cmd, "no keyframe exists at the source time"))?;
+        if matches.next().is_some() {
+            return Err(bad(cmd, "more than one keyframe exists at the source time"));
+        }
+        if current.keyframes.iter().any(|point| point.time == to) {
+            return Err(bad(cmd, "a keyframe already exists at the destination time"));
+        }
+        if !matches!(&point.value, ParamValue::Float(value) if value.is_finite())
+            || p.get("expectedKeyframeValue").and_then(Value::as_str) != Some(format!("{:?}", point.value).as_str())
+            || p.get("expectedInterpolation").and_then(Value::as_str) != Some(format!("{:?}", point.interp).as_str())
+        {
+            return Err(bad(cmd, "keyframe changed since move preview"));
+        }
+    } else if set_interpolation {
+        if current.keyframes.is_empty()
+            || current.keyframes.len() > 64
+            || current.keyframes.windows(2).any(|pair| pair[0].time >= pair[1].time)
+            || !matches!(&current.value, ParamValue::Float(value) if value.is_finite())
+        {
+            return Err(bad(cmd, "interpolation requires 1–64 ordered numeric keyframes"));
+        }
+        let at = media_time.ok_or_else(|| bad(cmd, "interpolation keyframe time missing"))?;
+        let mut matches = current.keyframes.iter().filter(|point| point.time == at);
+        let point = matches.next().ok_or_else(|| bad(cmd, "no keyframe exists at that clip time"))?;
+        if matches.next().is_some() {
+            return Err(bad(cmd, "more than one keyframe exists at that clip time"));
+        }
+        if !matches!(&point.value, ParamValue::Float(value) if value.is_finite())
+            || p.get("expectedKeyframeValue").and_then(Value::as_str) != Some(format!("{:?}", point.value).as_str())
+            || p.get("expectedInterpolation").and_then(Value::as_str) != Some(format!("{:?}", point.interp).as_str())
+        {
+            return Err(bad(cmd, "keyframe changed since interpolation preview"));
+        }
+        if interpolation.as_ref() == Some(&point.interp) {
+            return Err(bad(cmd, "keyframe already has that interpolation"));
+        }
+    } else if remove_keyframe {
+        if current.keyframes.len() < 2
+            || current.keyframes.len() > 64
+            || current.keyframes.windows(2).any(|pair| pair[0].time >= pair[1].time)
+            || !matches!(&current.value, ParamValue::Float(value) if value.is_finite())
+            || current.keyframes.iter().any(|point| !matches!(&point.value, ParamValue::Float(value) if value.is_finite()))
+        {
+            return Err(bad(cmd, "keyframe removal requires 2–64 ordered points"));
+        }
+        let at = media_time.ok_or_else(|| bad(cmd, "keyframe removal time missing"))?;
+        let point = current.keyframes.iter().find(|point| point.time == at).ok_or_else(|| bad(cmd, "no keyframe exists at that clip time"))?;
+        if !matches!(&point.value, ParamValue::Float(value) if value.is_finite())
+            || p.get("expectedKeyframeValue").and_then(Value::as_str) != Some(format!("{:?}", point.value).as_str())
+        {
+            return Err(bad(cmd, "keyframe value changed since preview"));
+        }
+    } else if edit_keyframe {
+        if current.keyframes.is_empty() || current.keyframes.len() > 64 {
+            return Err(bad(cmd, "existing keyframes are missing or exceed the bounded edit limit"));
+        }
+        let at = media_time.ok_or_else(|| bad(cmd, "existing keyframe time missing"))?;
+        let mut matches = current.keyframes.iter().filter(|point| point.time == at);
+        let point = matches.next().ok_or_else(|| bad(cmd, "no keyframe exists at that clip time"))?;
+        if matches.next().is_some() {
+            return Err(bad(cmd, "more than one keyframe exists at that clip time"));
+        }
+        if chosen.as_ref().is_none_or(|chosen| std::mem::discriminant(&point.value) != std::mem::discriminant(chosen))
+            || p.get("expectedKeyframeValue").and_then(Value::as_str) != Some(format!("{:?}", point.value).as_str())
+        {
+            return Err(bad(cmd, "keyframe value changed since preview"));
+        }
+        if chosen.as_ref().is_some_and(|chosen| &point.value == chosen) {
+            return Err(bad(cmd, "keyframe already has that value"));
+        }
+    } else if add_keyframe {
+        if current.keyframes.len() >= 64 || current.keyframes.windows(2).any(|pair| pair[0].time >= pair[1].time) {
+            return Err(bad(cmd, "existing keyframes exceed the bounded edit limit or are not ordered"));
+        }
+        let at = media_time.ok_or_else(|| bad(cmd, "new keyframe time missing"))?;
+        if current.keyframes.iter().any(|point| point.time == at) {
+            return Err(bad(cmd, "a keyframe already exists at that clip time"));
+        }
+    } else if !current.keyframes.is_empty() {
+        return Err(bad(cmd, "this action requires a parameter without existing keyframes"));
+    }
+    if let Some(chosen) = &chosen
+        && std::mem::discriminant(&current.value) != std::mem::discriminant(chosen)
+    {
+        return Err(bad(cmd, "effect parameter type changed since preview"));
+    }
+    if !keyframe && chosen.as_ref().is_some_and(|chosen| &current.value == chosen) {
+        return Err(bad(cmd, "parameter already has that value"));
+    }
+    let changed = s.edit_sequence(
+        if move_keyframe {
+            "Move Effect Keyframe"
+        } else if set_interpolation {
+            "Set Effect Keyframe Interpolation"
+        } else if remove_keyframe {
+            "Remove Effect Keyframe"
+        } else if edit_keyframe {
+            "Change Effect Keyframe"
+        } else if keyframe {
+            "Add Effect Keyframe"
+        } else {
+            "Change Effect Parameter"
+        },
+        |q, _, _| {
+            let (_, clip) = q.find_item_mut(clip_id).ok_or(filmcraft_edit::EditError::NoItem(clip_id))?;
+            let effect = clip.effects.get_mut(index).ok_or_else(|| bad(cmd, "effect index missing during edit"))?;
+            let parameter = effect.params.get_mut(param_id).ok_or_else(|| bad(cmd, "effect parameter missing during edit"))?;
+            if move_keyframe {
+                let from = media_time.ok_or_else(|| bad(cmd, "keyframe source time missing during edit"))?;
+                let to = to_media_time.ok_or_else(|| bad(cmd, "keyframe destination time missing during edit"))?;
+                let index = parameter.keyframes.iter().position(|point| point.time == from).ok_or_else(|| bad(cmd, "keyframe source missing during edit"))?;
+                let mut point = parameter.keyframes.remove(index);
+                point.time = to;
+                let insertion = parameter.keyframes.partition_point(|other| other.time < to);
+                parameter.keyframes.insert(insertion, point);
+            } else if set_interpolation {
+                let at = media_time.ok_or_else(|| bad(cmd, "interpolation keyframe time missing during edit"))?;
+                let point =
+                    parameter.keyframes.iter_mut().find(|point| point.time == at).ok_or_else(|| bad(cmd, "keyframe missing during interpolation edit"))?;
+                point.interp = interpolation.ok_or_else(|| bad(cmd, "new interpolation missing during edit"))?;
+            } else if remove_keyframe {
+                let at = media_time.ok_or_else(|| bad(cmd, "keyframe removal time missing during edit"))?;
+                let point_index = parameter.keyframes.iter().position(|point| point.time == at).ok_or_else(|| bad(cmd, "keyframe missing during removal"))?;
+                parameter.keyframes.remove(point_index);
+            } else if edit_keyframe {
+                let at = media_time.ok_or_else(|| bad(cmd, "existing keyframe time missing during edit"))?;
+                let point = parameter.keyframes.iter_mut().find(|point| point.time == at).ok_or_else(|| bad(cmd, "existing keyframe missing during edit"))?;
+                point.value = chosen.clone().ok_or_else(|| bad(cmd, "new keyframe value missing during edit"))?;
+            } else if let Some(at) = media_time {
+                parameter.put_keyframe(at, chosen.clone().ok_or_else(|| bad(cmd, "new keyframe value missing during edit"))?);
+            } else {
+                parameter.value = chosen.clone().ok_or_else(|| bad(cmd, "static value missing during edit"))?;
+            }
+            Ok(effect.clone())
+        },
+    )?;
+    Ok(json!({"clip":clip_id.0,"effect_index":index,"effect":{
+        "effect":changed.effect,"enabled":changed.enabled,"masks":changed.masks.len(),
+        "params":changed.params.iter().map(|(key,param)| (key.clone(),inspected_param(param))).collect::<serde_json::Map<_,_>>()}}))
+}
+
 pub(crate) fn json_to_param(template: &ParamValue, v: &Value) -> Option<ParamValue> {
     Some(match template {
         ParamValue::Float(_) => ParamValue::Float(v.as_f64()?),
@@ -3877,6 +4346,7 @@ fn set_clipboard(st: &mut crate::EditorState, (clips, markers): Clipboard) {
     st.clipboard = clips;
     st.clipboard_markers = markers;
     st.caption_clipboard.clear();
+    st.clipboard_transition = None;
 }
 
 /// Put a Lift or Extract cut on the clipboard; returns how many clips it holds (0 leaves the
@@ -3971,7 +4441,7 @@ pub fn next_nested_name(s: &Session) -> String {
 
 fn nest(s: &mut Session, p: &Value) -> Result<Value> {
     let seq_id = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
-    let sel = with_links(s, &s.state.selection.clone());
+    let sel = with_links(s, &clips_p(s, p));
     let q = s.active_sequence().ok_or(EngineError::NoSequence)?.clone();
     let name = str_p(p, "name").filter(|n| !n.trim().is_empty()).map(str::to_string).unwrap_or_else(|| next_nested_name(s));
     let mut items: Vec<(TrackKind, usize, filmcraft_project::TrackItem)> = Vec::new();
@@ -4138,6 +4608,10 @@ fn list_effects(p: &Value) -> Value {
                 "id": d.id,
                 "name": d.name,
                 "kind": format!("{:?}", d.kind),
+                "controllerVideoEffect": d.kind == filmcraft_project::EffectKind::Video
+                    && !d.intrinsic && d.id != "lumetri"
+                    && d.category.first().copied() == Some("Video Effects")
+                    && !filmcraft_project::graphic::is_layer_id(d.id),
                 "category": d.category,
                 "folder": d.category.get(1),
                 "path": d.category.join("/"),
@@ -4374,7 +4848,18 @@ fn set_transition(s: &mut Session, p: &Value) -> Result<Value> {
     let frame = rate.frame_duration();
     let found = q.all_tracks().find_map(|tr| tr.transitions.iter().find(|x| x.id == tid).map(|x| (tr, x)));
     let (track, cur) = found.ok_or_else(|| bad(CMD, format!("no transition {id}")))?;
+    if track.locked {
+        return Err(bad(CMD, "transition track is locked"));
+    }
     let mut cur = cur.clone();
+    if let Some(effect) = p.get("effect") {
+        let name = effect.as_str().ok_or_else(|| bad(CMD, "`effect` must be a transition name"))?;
+        let kind = if track.kind == TrackKind::Video { filmcraft_project::EffectKind::VideoTransition } else { filmcraft_project::EffectKind::AudioTransition };
+        let def = filmcraft_project::vtransition::find_transition(name, kind).ok_or_else(|| bad(CMD, format!("unknown transition `{name}`")))?;
+        if def.id != cur.effect.effect {
+            cur.effect = def.instance();
+        }
+    }
     let (lo, cut, hi) = edit::transitions::bounds(track, &cur).ok_or_else(|| bad(CMD, "the transition's clips are gone"))?;
     // times outside the clips it joins are refused before any frame arithmetic (hostile input)
     let room = Tick(hi.0.saturating_sub(lo.0));
@@ -4410,6 +4895,10 @@ fn set_transition(s: &mut Session, p: &Value) -> Result<Value> {
     } else {
         None
     };
+    if let Some((st, d)) = span {
+        let end = st.0.checked_add(d.0).ok_or_else(|| bad(CMD, "transition time is out of range"))?;
+        crate::transition_clipboard::validate_source_handles(s, track, cur.from, cur.to, st, Tick(end), CMD)?;
+    }
     if p.get("reset").and_then(Value::as_bool).unwrap_or(false)
         && let Some(def) = cur.effect.def()
     {
@@ -4540,7 +5029,9 @@ pub fn inspect_project(s: &Session) -> Value {
             "children": b.children.iter().map(|c| match c {
                 filmcraft_project::BinEntry::Item(i) => {
                     let it = p.item(*i);
-                    json!({"item": i.0, "name": it.map(|x| x.name.clone()), "type": it.map(|x| x.type_label()), "duration": it.map(|x| x.duration().0), "label": it.map(|x| x.label.name())})
+                    json!({"item": i.0, "name": it.map(|x| x.name.clone()), "type": it.map(|x| x.type_label()), "duration": it.map(|x| x.duration().0), "label": it.map(|x| x.label.name()),
+                        "audioClipCount": it.and_then(|x| x.as_media()).filter(|_| it.is_some_and(|x| x.has_audio()))
+                            .map(|m| m.info.audio_streams.len().min(filmcraft_media::MAX_AUDIO_STREAMS).saturating_add(m.interpret.audio_channels.as_ref().map_or(0, |c| c.clips.len().saturating_sub(1))).min(crate::sequence_tools::MAX_TRACKS))})
                 }
                 filmcraft_project::BinEntry::Bin(b) => bin(b, p),
             }).collect::<Vec<_>>()
@@ -4557,6 +5048,16 @@ pub fn inspect_project(s: &Session) -> Value {
     })
 }
 
+fn inspected_param(param: &filmcraft_project::Param) -> Value {
+    json!({"value":format!("{:?}",param.value),"keyframes":param.keyframes.len(),
+        "keyframeDetails":param.keyframes.iter().map(|key| json!({"time":key.time.0,
+            "value":format!("{:?}",key.value),"interpolation":format!("{:?}",key.interp)})).collect::<Vec<_>>()})
+}
+
+pub(crate) fn inspected_effect(effect: &filmcraft_project::EffectInstance) -> Value {
+    json!({"effect":effect.effect,"enabled":effect.enabled,"masks":effect.masks.len(),"params":effect.params.iter().map(|(name,value)|(name.clone(),inspected_param(value))).collect::<serde_json::Map<_,_>>()})
+}
+
 pub fn inspect_sequence(s: &Session, id: ItemId, q: &filmcraft_project::Sequence) -> Value {
     let rate = q.settings.frame_rate;
     let tr = |t: &filmcraft_project::Track| {
@@ -4565,10 +5066,10 @@ pub fn inspect_sequence(s: &Session, id: ItemId, q: &filmcraft_project::Sequence
             "label": t.label.map(|l| l.name()),
             "items": t.items.iter().map(|i| json!({
                 "clip": i.id.0, "item": i.item.0, "name": i.name, "start": i.start.0, "duration": i.duration.0,
-                "startFrame": rate.frame_at(i.start), "durationFrames": rate.frame_at(i.duration), "sourceIn": i.source_in.0, "speed": i.speed, "reverse": i.reverse,
+                "startFrame": rate.frame_at(i.start), "durationFrames": rate.frame_at(i.duration), "sourceIn": i.source_in.0, "speed": i.speed, "reverse": i.reverse, "frameHold": i.frame_hold.map(|t| t.0),
                 "end": i.end().0, "endFrame": rate.frame_at(i.end()), "sourceOut": i.source_out().0, "gainDb": i.gain_db,
                 "enabled": i.enabled, "link": i.link, "label": i.label.name(),
-                "effects": i.effects.iter().map(|e| json!({"effect": e.effect, "enabled": e.enabled, "masks": e.masks.len(), "params": e.params.iter().map(|(k, p)| (k.clone(), json!({"value": format!("{:?}", p.value), "keyframes": p.keyframes.len()}))).collect::<serde_json::Map<_, _>>()})).collect::<Vec<_>>(),
+                "effects": i.effects.iter().map(|e| json!({"effect": e.effect, "enabled": e.enabled, "masks": e.masks.len(), "params": e.params.iter().map(|(k, p)| (k.clone(), inspected_param(p))).collect::<serde_json::Map<_, _>>()})).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
             "transitions": t.transitions.iter().map(|x| json!({"id": x.id.0, "effect": x.effect.effect, "start": x.start.0, "duration": x.duration.0, "from": x.from.map(|c| c.0), "to": x.to.map(|c| c.0), "reverse": x.reverse, "align": filmcraft_edit::transitions::bounds(t, x).map(|b| filmcraft_edit::transitions::alignment(x, b.1, rate.frame_duration()).id()), "params": x.effect.params.iter().map(|(k, v)| (k.clone(), serde_json::to_value(&v.value).unwrap_or_default())).collect::<serde_json::Map<_, _>>()})).collect::<Vec<_>>(),
         })
@@ -4618,21 +5119,23 @@ fn name_project(p: &mut filmcraft_project::Project, name: String) {
 
 fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
     let t0 = web_time::Instant::now();
+    let mut candidate = s.project.clone();
     // Save As renames the project after its new file (not an edit: no undo step, not dirty).
     if adopt
         && let Some(name) = project_name_for(path)
         && s.project.name != name
     {
-        name_project(std::sync::Arc::make_mut(&mut s.project), name);
+        name_project(std::sync::Arc::make_mut(&mut candidate), name);
     }
     // what is open (sequence tabs, how each is shown) goes into the file beside the project
     let view = s.project_view();
-    let bytes = filmcraft_format::encode_with_view(&s.project, Some(&view), false);
+    let bytes = filmcraft_format::encode_with_view(&candidate, Some(&view), false);
+    filmcraft_format::check_project_size(bytes.len()).map_err(|error| EngineError::Other(format!("{path}: {error}")))?;
     let mut backup = None;
     if adopt && s.path.as_deref() == Some(path) && s.loaded_schema < filmcraft_format::SCHEMA_VERSION {
         let b = schema_backup_path(path, s.loaded_schema);
-        if s.services.read_file(&b).is_err()
-            && let Ok(old) = s.services.read_file(path)
+        if s.services.read_file_bounded(&b, filmcraft_format::MAX_PROJECT_BYTES).is_err()
+            && let Ok(old) = s.services.read_file_bounded(path, filmcraft_format::MAX_PROJECT_BYTES)
         {
             s.services.write_file(&b, &old).map_err(|e| EngineError::Other(format!("{b}: {e}")))?;
             backup = Some(b);
@@ -4640,11 +5143,17 @@ fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
     }
     s.services.write_file(path, &bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     if adopt {
+        s.project = candidate;
         s.path = Some(path.to_string());
         s.previews_follow_path();
         s.note_recent_project();
         s.saved_revision = s.revision;
         s.loaded_schema = filmcraft_format::SCHEMA_VERSION;
+        if s.prefs.general.persistent_undo
+            && let Err(e) = crate::persistent_history::save(s, path)
+        {
+            s.toast(format!("Project saved; undo history could not be saved: {e}"));
+        }
     }
     Ok(json!({"path": path, "bytes": bytes.len(), "ms": t0.elapsed().as_secs_f64() * 1000.0, "backup": backup}))
 }
@@ -4684,7 +5193,7 @@ fn install_project(s: &mut Session, proj: filmcraft_project::Project, path: Opti
 }
 
 fn open_project(s: &mut Session, path: &str) -> Result<Value> {
-    let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    let bytes = s.services.read_file_bounded(path, filmcraft_format::MAX_PROJECT_BYTES).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     let loaded = filmcraft_format::decode(&bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     let (from, migrated) = (loaded.schema_version, loaded.migrated());
     install_project(s, loaded.project, Some(path.to_string()), true);
@@ -4699,6 +5208,12 @@ fn open_project(s: &mut Session, path: &str) -> Result<Value> {
     s.loaded_schema = from;
     if migrated {
         s.toast(format!("Upgraded project from schema v{from} to v{}; the original is kept as a backup when you save", filmcraft_format::SCHEMA_VERSION));
+    }
+    if s.prefs.general.persistent_undo
+        && let Err(e) = crate::persistent_history::load(s, path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        s.toast(format!("Project opened; saved undo history was ignored: {e}"));
     }
     let missing = crate::relink::on_open(s);
     Ok(json!({"path": path, "schemaVersion": from, "migrated": migrated, "missingMedia": missing}))
@@ -4715,6 +5230,18 @@ fn recover(s: &mut Session, id: Option<&str>) -> Result<Value> {
     let saved_at = per.local_time(c.meta.saved_unix);
     let loaded = crate::autosave::load_candidate(&c).map_err(EngineError::Other)?;
     install_project(s, loaded.project, c.meta.project_path.clone(), false);
+    if let Some(revision) = c.meta.history_revision {
+        let history = c.dir.join(format!("history-{revision}"));
+        let media_path = s.path.clone();
+        if revision != c.meta.revision {
+            s.toast("Project recovered; recovery Undo/Redo generation was invalid");
+        } else if let Err(error) = crate::persistent_history::load_snapshot(s, &history.to_string_lossy(), media_path.as_deref()) {
+            s.toast(format!("Project recovered; recovery Undo/Redo history was ignored: {error}"));
+        }
+    }
+    if let Some(view) = loaded.view.filter(|_| s.prefs.timeline.restore_open_sequences) {
+        s.restore_project_view(view);
+    }
     if let Some(seq) = s.state.active_sequence {
         s.events.push(crate::Event::OpenSequence(seq));
     }
@@ -4747,4 +5274,214 @@ fn auto_save_dir(s: &Session) -> std::path::PathBuf {
 
 fn auto_save_name(s: &Session) -> String {
     s.path.as_deref().and_then(|p| std::path::Path::new(p).file_stem()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| s.project.name.clone())
+}
+
+/// Atomically validate optimistic revision guards and bounded controller-only modes.
+pub(crate) fn validate_controller_context(s: &Session, id: &str, p: &Value) -> Result<()> {
+    for key in ["expectedRevision", "sequenceId"] {
+        if let Some(value) = p.get(key) {
+            let expected = value.as_u64().ok_or_else(|| bad(id, format!("invalid {key}")))?;
+            if key == "expectedRevision" && expected != s.revision {
+                return Err(bad(id, format!("stale project revision: expected {expected}, current {}", s.revision)));
+            }
+            if key == "sequenceId" && s.state.active_sequence.map(|q| q.0) != Some(expected) {
+                return Err(bad(id, "active sequence changed since preview"));
+            }
+        }
+    }
+    let controlled = p.as_object().is_some_and(|o| o.keys().any(|key| key.starts_with("controller")));
+    if !controlled {
+        return Ok(());
+    }
+    if p.get("expectedRevision").and_then(Value::as_u64).is_none() || p.get("sequenceId").and_then(Value::as_u64).is_none() {
+        return Err(bad(id, "controller edit requires expectedRevision and sequenceId"));
+    }
+    let allowed: &[&str] = match id {
+        "edit.clear" => &["controllerClipDelete"],
+        "timeline.setTrack" => &["controllerAudioTrackMute"],
+        "timeline.place" => &["controllerSingleAudioClip"],
+        "clip.nest" => &["controllerSingleNest"],
+        "effects.apply" | "lumetri.applyPreset" => &["controllerSingleVideoClip"],
+        "effects.remove" => &["controllerSingleVideoEffect"],
+        "effects.setParam" => &[
+            "controllerStaticVideoParam",
+            "controllerVideoKeyframe",
+            "controllerExistingVideoKeyframe",
+            "controllerRemoveVideoKeyframe",
+            "controllerKeyframeInterpolation",
+            "controllerMoveVideoKeyframe",
+        ],
+        _ => &[],
+    };
+    if p.as_object().is_some_and(|o| o.keys().any(|key| key.starts_with("controller") && !allowed.contains(&key.as_str()))) {
+        return Err(bad(id, "unknown controller mode"));
+    }
+    match id {
+        "edit.clear" => {
+            if p.get("controllerClipDelete").and_then(Value::as_bool) != Some(true) {
+                return Err(bad(id, "invalid controller delete mode"));
+            }
+            const CMD: &str = "edit.clear";
+            let keys = p.as_object().ok_or_else(|| bad(CMD, "controller delete needs an argument object"))?;
+            if keys.keys().any(|key| !matches!(key.as_str(), "clips" | "clip" | "controllerClipDelete" | "expectedRevision" | "sequenceId")) {
+                return Err(bad(CMD, "controller delete has unexpected arguments"));
+            }
+            let revision = u64_p(p, "expectedRevision").ok_or_else(|| bad(CMD, "controller delete needs expectedRevision"))?;
+            let sequence_id = u64_p(p, "sequenceId").ok_or_else(|| bad(CMD, "controller delete needs sequenceId"))?;
+            let seed = u64_p(p, "clip").ok_or_else(|| bad(CMD, "controller delete needs one clip ID"))?;
+            if revision != s.revision {
+                return Err(bad(CMD, "stale project revision"));
+            }
+            if s.state.active_sequence.map(|id| id.0) != Some(sequence_id) {
+                return Err(bad(CMD, "active sequence changed since preview"));
+            }
+            let supplied = p.get("clips").and_then(Value::as_array).ok_or_else(|| bad(CMD, "controller delete needs clip IDs"))?;
+            if supplied.is_empty() || supplied.len() > 32 || supplied.iter().any(|v| v.as_u64().is_none()) {
+                return Err(bad(CMD, "controller delete needs 1–32 valid clip IDs"));
+            }
+            let ids: std::collections::BTreeSet<_> = supplied.iter().filter_map(Value::as_u64).collect();
+            if ids.len() != supplied.len() || !ids.contains(&seed) {
+                return Err(bad(CMD, "controller delete has duplicate or missing clip IDs"));
+            }
+            let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
+            let seed_item = seq.find_item(ClipId(seed)).ok_or_else(|| bad(CMD, "clip was not found"))?.1;
+            let link = seed_item.link;
+            let expected: std::collections::BTreeSet<_> = seq
+                .all_tracks()
+                .flat_map(|t| &t.items)
+                .filter(|item| item.id.0 == seed || link.is_some_and(|group| item.link == Some(group)))
+                .map(|item| item.id.0)
+                .collect();
+            if ids != expected {
+                return Err(bad(CMD, "linked clip set differs from preview"));
+            }
+            for id in &ids {
+                let (track_id, _) = seq.find_item(ClipId(*id)).ok_or_else(|| bad(CMD, "clip was not found"))?;
+                if seq.track(track_id).is_none_or(|track| track.locked) {
+                    return Err(bad(CMD, "a target clip is on a locked track"));
+                }
+            }
+            if seq
+                .all_tracks()
+                .flat_map(|track| &track.transitions)
+                .any(|tr| tr.from.is_some_and(|id| ids.contains(&id.0)) || tr.to.is_some_and(|id| ids.contains(&id.0)))
+            {
+                return Err(bad(CMD, "a target clip has an attached transition"));
+            }
+        }
+        "timeline.setTrack" => {
+            let controller = p.get("controllerAudioTrackMute").is_some();
+            if controller {
+                if p.get("controllerAudioTrackMute").and_then(Value::as_bool) != Some(true)
+                    || p.as_object().is_none_or(|fields| {
+                        fields.keys().any(|key| {
+                            !matches!(key.as_str(), "track" | "muted" | "controllerAudioTrackMute" | "expectedMuted" | "expectedRevision" | "sequenceId")
+                        })
+                    })
+                {
+                    return Err(bad("timeline.setTrack", "controller mute requires only the approved track and mute parameters"));
+                }
+                let revision =
+                    p.get("expectedRevision").and_then(Value::as_u64).ok_or_else(|| bad("timeline.setTrack", "controller mute needs expectedRevision"))?;
+                if revision != s.revision {
+                    return Err(bad("timeline.setTrack", format!("stale project revision: expected {revision}, current {}", s.revision)));
+                }
+                let sequence = p.get("sequenceId").and_then(Value::as_u64).ok_or_else(|| bad("timeline.setTrack", "controller mute needs sequenceId"))?;
+                if s.state.active_sequence.map(|id| id.0) != Some(sequence) {
+                    return Err(bad("timeline.setTrack", "active sequence changed since preview"));
+                }
+            }
+            let tr = track_p(s, p, "track", "timeline.setTrack")?.ok_or_else(|| bad("timeline.setTrack", "need `track`"))?;
+            if controller {
+                if p.get("track").and_then(Value::as_u64) != Some(tr.0) {
+                    return Err(bad("timeline.setTrack", "controller mute requires the explicit audio track ID"));
+                }
+                let requested =
+                    p.get("muted").and_then(Value::as_bool).ok_or_else(|| bad("timeline.setTrack", "controller mute needs a boolean muted value"))?;
+                let expected =
+                    p.get("expectedMuted").and_then(Value::as_bool).ok_or_else(|| bad("timeline.setTrack", "controller mute needs expectedMuted"))?;
+                let track = s.active_sequence().and_then(|q| q.track(tr)).ok_or_else(|| bad("timeline.setTrack", "audio track missing"))?;
+                if track.kind != TrackKind::Audio || track.locked || !track.lane_keyframes("mute").is_empty() {
+                    return Err(bad("timeline.setTrack", "controller mute requires one unlocked audio track without mute automation"));
+                }
+                if track.muted != expected || requested == expected {
+                    return Err(bad("timeline.setTrack", "audio track mute state changed since preview"));
+                }
+            }
+        }
+        "timeline.place" => {
+            if p.get("controllerSingleAudioClip").and_then(Value::as_bool) != Some(true) {
+                return Err(bad(id, "invalid controller placement mode"));
+            }
+            let item = item_p(p, "item").and_then(|item| s.project.item(item)).ok_or_else(|| bad(id, "audio item missing"))?;
+            if item.has_video()
+                || !item.has_audio()
+                || item.as_media().is_none_or(|m| m.info.audio_streams.len() != 1 || m.interpret.audio_channels.as_ref().is_some_and(|c| c.clips.len() > 1))
+            {
+                return Err(bad(id, "controller placement requires one unsplit audio-only source"));
+            }
+            if p.get("insert") == Some(&json!(true)) || p.get("items").is_some() {
+                return Err(bad(id, "controller placement does not insert or place multiple items"));
+            }
+        }
+        "clip.nest" => {
+            if p.get("controllerSingleNest").and_then(Value::as_bool) != Some(true) {
+                return Err(bad(id, "invalid controller nest mode"));
+            }
+            let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
+            let name = str_p(p, "name").ok_or_else(|| bad(id, "need a sequence name"))?.to_string();
+            let controlled = bool_p(p, "controllerSingleNest") == Some(true);
+            let sel = if controlled {
+                let clips = p.get("clips").and_then(Value::as_array).ok_or_else(|| bad("clip.nest", "need exactly one clip ID"))?;
+                if clips.len() != 1 {
+                    return Err(bad("clip.nest", "need exactly one clip ID"));
+                }
+                let id = clips[0].as_u64().ok_or_else(|| bad("clip.nest", "clip ID must be a positive integer"))?;
+                if id == 0 {
+                    return Err(bad("clip.nest", "clip ID must be a positive integer"));
+                }
+                if name.trim().is_empty() || name.chars().count() > 256 {
+                    return Err(bad("clip.nest", "sequence name must contain 1–256 characters"));
+                }
+                if s.project.items.values().any(|item| item.name == name) {
+                    return Err(bad("clip.nest", "project already has an item with this name"));
+                }
+                let (track_id, clip) = q.find_item(ClipId(id)).ok_or_else(|| bad("clip.nest", "clip was not found in the active sequence"))?;
+                let track = q.track(track_id).ok_or(EngineError::NoSequence)?;
+                if track.kind != TrackKind::Video || track.locked || !track.enabled || clip.link.is_some() {
+                    return Err(bad("clip.nest", "controlled nesting requires one unlinked video clip on an enabled, unlocked track"));
+                }
+                if s.project.sequence(clip.item).is_some() {
+                    return Err(bad("clip.nest", "nesting an existing sequence is outside this controller action"));
+                }
+                if track.transitions.iter().any(|tr| tr.from == Some(clip.id) || tr.to == Some(clip.id)) {
+                    return Err(bad("clip.nest", "clip has an attached transition"));
+                }
+                vec![ClipId(id)]
+            } else {
+                Vec::new()
+            };
+
+            let _ = sel;
+        }
+        "lumetri.applyPreset" => {
+            let clips = clips_p(s, p);
+            if p.get("controllerSingleVideoClip").and_then(Value::as_bool) != Some(true)
+                || clips.len() != 1
+                || p.get("clips")
+                    .and_then(Value::as_array)
+                    .is_none_or(|ids| ids.len() != 1 || ids.first().and_then(Value::as_u64) != clips.first().map(|id| id.0))
+            {
+                return Err(bad(id, "controller color preset requires one explicit video clip"));
+            }
+            let clip_id = clips.first().copied().ok_or_else(|| bad(id, "video clip missing"))?;
+            let (track_id, clip) = s.active_sequence().and_then(|q| q.find_item(clip_id)).ok_or_else(|| bad(id, "video clip missing"))?;
+            if !clip.enabled || s.active_sequence().and_then(|q| q.track(track_id)).is_none_or(|t| t.kind != TrackKind::Video || t.locked || !t.enabled) {
+                return Err(bad(id, "video clip or track is locked or disabled"));
+            }
+        }
+        "effects.apply" | "effects.remove" | "effects.setParam" => {}
+        _ => return Err(bad(id, "unsupported controller mode")),
+    }
+    Ok(())
 }

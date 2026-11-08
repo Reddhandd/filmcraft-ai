@@ -521,11 +521,14 @@ pub fn properties(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let fams = filmcraft_text::families();
             let (_, mut vui) = cx.row(ui, tl!("Font"));
             let r = craft_ui::ComboBox::from_id_salt(("gfx-font", clip.0, l)).selected_text(&family).width(170.0).height(400.0).show_ui(&mut vui, |ui| {
-                if !filmcraft_text::fonts::system_scanned() {
-                    filmcraft_text::fonts::scan_system();
-                }
-                for (f, _) in &fams {
-                    if ui.selectable_label(*f == family, f).clicked() {
+                crate::widgets::font_preview::prepare(ui);
+                for (index, (f, _)) in fams.iter().enumerate() {
+                    let row = crate::widgets::font_preview::row(ui, *f == family, f);
+                    let visible = row.rect.intersect(ui.clip_rect());
+                    if visible.is_positive() {
+                        cx.auto(&format!("font.option.{}", crate::widgets::font_preview::suffix(f, index)), visible, &crate::widgets::font_preview::label(f));
+                    }
+                    if row.clicked() {
                         cx.set("font", json!(f));
                     }
                 }

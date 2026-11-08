@@ -209,3 +209,53 @@ fn cue_times_count_down_whole_seconds() {
     assert_eq!(tone.len(), 4_800);
     assert!(tone.iter().all(|x| x.abs() <= 0.25) && tone[0] == 0.0);
 }
+
+#[test]
+fn discovery_status_is_read_only_and_separate_from_capture_errors() {
+    use crate::voiceover::{AudioInput, InputFormat};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    };
+    struct Metadata(Arc<AtomicU8>);
+    impl AudioInput for Metadata {
+        fn devices(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn channels(&self, _: &str) -> u16 {
+            if self.0.load(Ordering::Acquire) == 2 { 8 } else { 0 }
+        }
+        fn discovery_error(&self) -> Option<String> {
+            (self.0.load(Ordering::Acquire) == 1).then(|| "Metadata driver timeout".into())
+        }
+        fn start(&mut self, _: &str, _: u32) -> std::result::Result<InputFormat, String> {
+            Err("not used".into())
+        }
+        fn read(&mut self, _: usize) -> Vec<Vec<f32>> {
+            Vec::new()
+        }
+        fn discard(&mut self) {}
+        fn stop(&mut self) {}
+    }
+    let state = Arc::new(AtomicU8::new(0));
+    let mut s = Session::default();
+    s.voiceover.input = Some(Box::new(Metadata(state.clone())));
+    let before = s.project.clone();
+    let preferences = serde_json::to_value(&s.prefs.voice_over).unwrap();
+    let pending = s.execute("audio.voiceover.settings", json!({})).unwrap();
+    assert_eq!(pending["channels"], 0);
+    assert_eq!(pending["inputDiscoveryPending"], true);
+    assert!(pending["inputDiscoveryError"].is_null());
+    state.store(1, Ordering::Release);
+    let failed = s.execute("audio.voiceover.settings", json!({})).unwrap();
+    assert_eq!(failed["inputDiscoveryPending"], false);
+    assert_eq!(failed["inputDiscoveryError"], "Metadata driver timeout");
+    assert!(s.voiceover.input.as_ref().unwrap().error().is_none(), "metadata failure is not a failed captured take");
+    state.store(2, Ordering::Release);
+    let ready = s.execute("audio.voiceover.settings", json!({})).unwrap();
+    assert_eq!(ready["channels"], 8);
+    assert_eq!(ready["inputDiscoveryPending"], false);
+    assert!(ready["inputDiscoveryError"].is_null());
+    assert_eq!(*s.project, *before);
+    assert_eq!(serde_json::to_value(&s.prefs.voice_over).unwrap(), preferences);
+}

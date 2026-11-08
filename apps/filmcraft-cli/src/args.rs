@@ -10,6 +10,7 @@ const VALUED: &[&str] = &[
     "--project",
     "--save-as",
     "--bridge",
+    "--provider-profile",
     "--format",
     "--scale",
     "--quality",

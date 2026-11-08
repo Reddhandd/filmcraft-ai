@@ -10,6 +10,7 @@ use crate::icons::Icon;
 pub enum Tool {
     #[default]
     Selection,
+    Marquee,
     TrackSelectForward,
     TrackSelectBackward,
     Ripple,
@@ -29,8 +30,9 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 17] = [
+    pub const ALL: [Tool; 18] = [
         Tool::Selection,
+        Tool::Marquee,
         Tool::TrackSelectForward,
         Tool::TrackSelectBackward,
         Tool::Ripple,
@@ -51,6 +53,7 @@ impl Tool {
     pub fn label(self) -> &'static str {
         match self {
             Tool::Selection => "Selection Tool",
+            Tool::Marquee => "Marquee Selection Tool",
             Tool::TrackSelectForward => "Track Select Forward Tool",
             Tool::TrackSelectBackward => "Track Select Backward Tool",
             Tool::Ripple => "Ripple Edit Tool",
@@ -72,6 +75,13 @@ impl Tool {
     pub fn shortcut(self) -> &'static str {
         match self {
             Tool::Selection => "V",
+            Tool::Marquee => {
+                if cfg!(target_os = "macos") {
+                    "Ctrl+Cmd+M"
+                } else {
+                    "Shift+V"
+                }
+            }
             Tool::TrackSelectForward => "A",
             Tool::TrackSelectBackward => "Shift+A",
             Tool::Ripple => "B",
@@ -92,6 +102,7 @@ impl Tool {
     pub fn icon(self) -> Icon {
         match self {
             Tool::Selection => Icon::Selection,
+            Tool::Marquee => Icon::Rectangle,
             Tool::TrackSelectForward => Icon::TrackSelectFwd,
             Tool::TrackSelectBackward => Icon::TrackSelectBack,
             Tool::Ripple => Icon::Ripple,
@@ -120,6 +131,7 @@ impl Tool {
     pub fn groups() -> Vec<Vec<Tool>> {
         vec![
             vec![Tool::Selection],
+            vec![Tool::Marquee],
             vec![Tool::TrackSelectForward, Tool::TrackSelectBackward],
             vec![Tool::Ripple, Tool::Rolling, Tool::RateStretch, Tool::Remix],
             vec![Tool::Razor],
@@ -431,6 +443,9 @@ pub struct KeyframeRef {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UiState {
+    /// Session-only command text and results are never saved in preferences or projects.
+    #[serde(skip)]
+    pub console: crate::console::Console,
     #[serde(default)]
     pub language: crate::i18n::Language,
     pub tool: Tool,
@@ -525,6 +540,12 @@ pub struct UiState {
     /// Audio Gain dialog draft (mode, dB values).
     #[serde(default)]
     pub audio_gain: AudioGainDraft,
+    /// Reviewed live-video to studio-song timing plan.
+    #[serde(default)]
+    pub performance_match: Option<crate::panels::performance_match::Draft>,
+    /// Reviewed beat, marker, section and video-cut plan.
+    #[serde(default)]
+    pub music_analysis: Option<crate::panels::music_analysis::Draft>,
     /// Add Tracks dialog draft.
     #[serde(default)]
     pub add_tracks: AddTracksDraft,
@@ -969,6 +990,7 @@ fn yes() -> bool {
 impl Default for UiState {
     fn default() -> Self {
         Self {
+            console: Default::default(),
             language: crate::i18n::Language::default(),
             tool: Tool::Selection,
             mode: Mode::Edit,
@@ -1008,6 +1030,8 @@ impl Default for UiState {
             mixer_meter_input_only: false,
             settings: None,
             audio_gain: AudioGainDraft::default(),
+            performance_match: None,
+            music_analysis: None,
             add_tracks: AddTracksDraft::default(),
             delete_tracks: DeleteTracksDraft::default(),
             sequence_settings: SequenceSettingsDraft::default(),

@@ -6,8 +6,9 @@
 //! clip whose enabled standard effects all have a GPU implementation ([`crate::gpufx`]) carries
 //! them as a [`LayerFx`]: their parameters evaluated at the frame's time, run by the GPU on the
 //! clip's working image before Motion places it, in the CPU's order (effects → Motion → Opacity /
-//! blend). Anything the shaders don't cover yet — other standard effects, masks, adjustment
-//! layers, nested sequences, transitions other than dissolves, dips and Push — is rendered on the CPU
+//! blend). Supported full-frame Normal adjustments run as ordered composite operations. Anything
+//! the shaders don't cover yet — other effects, masks, adjustment coverage/blends, transformed
+//! nested sequences with visible borders or rotation, transitions other than dissolves, dips and Push — is rendered on the CPU
 //! for that layer (or the whole frame) and handed over as a pre-composited image, so the GPU path
 //! is always exact with respect to the CPU reference.
 //!
@@ -30,6 +31,8 @@ use crate::{Blend, RenderOptions, SourceProvider, motion_matrix, output_size};
 /// A GPU frame plan retains every resolved source frame. Nested sequences may share the same
 /// child sequence many times, so recursion depth alone does not bound this expansion.
 const MAX_PLAN_LAYERS: usize = 4096;
+/// Bound retained frames, including CPU working images deferred to GPU placement.
+const MAX_PLAN_FRAME_BYTES: usize = 512 * 1024 * 1024;
 
 /// One layer for the GPU, bottom to top.
 #[derive(Clone)]
@@ -87,6 +90,12 @@ pub enum FramePlan {
 #[derive(Clone)]
 pub enum PlanStep {
     Layers(Vec<PlanLayer>),
+    /// Apply effects to the lower-track composite, then replace it with the opacity-weighted
+    /// result. This is replacement, including transparent pixels, rather than source-over.
+    Adjustment {
+        fx: LayerFx,
+        opacity: f32,
+    },
     /// Inputs are isolated clip canvases; transition result composites Normal over lower tracks.
     Transition {
         inputs: [Vec<PlanLayer>; 2],
@@ -100,8 +109,9 @@ pub enum PlanStep {
 struct PlanStack {
     steps: Vec<PlanStep>,
     exhausted: bool,
-    /// Layers held in `steps`, kept as they are pushed so the cap check stays O(1).
+    /// Budget units held in `steps`: source layers and adjustment operations, tracked in O(1).
     layers: usize,
+    frame_bytes: usize,
 }
 
 impl PlanStack {
@@ -113,10 +123,12 @@ impl PlanStack {
         if self.exhausted {
             return;
         }
-        if self.layer_count() >= MAX_PLAN_LAYERS {
+        let bytes = layer.frame.byte_size();
+        if self.layer_count() >= MAX_PLAN_LAYERS || bytes > MAX_PLAN_FRAME_BYTES.saturating_sub(self.frame_bytes) {
             self.exhausted = true;
             return;
         }
+        self.frame_bytes = self.frame_bytes.saturating_add(bytes);
         if let Some(PlanStep::Layers(layers)) = self.steps.last_mut() {
             layers.push(layer);
         } else {
@@ -127,12 +139,24 @@ impl PlanStack {
 
     fn push_transition(&mut self, inputs: [Vec<PlanLayer>; 2], effect: filmcraft_project::EffectInstance, progress: f32, scale: f32) {
         let added: usize = inputs.iter().map(Vec::len).sum();
-        if self.exhausted || self.layer_count().saturating_add(added) > MAX_PLAN_LAYERS {
+        let bytes = inputs.iter().flatten().fold(0usize, |sum, layer| sum.saturating_add(layer.frame.byte_size()));
+        if self.exhausted || self.layer_count().saturating_add(added) > MAX_PLAN_LAYERS || bytes > MAX_PLAN_FRAME_BYTES.saturating_sub(self.frame_bytes) {
             self.exhausted = true;
             return;
         }
+        self.frame_bytes = self.frame_bytes.saturating_add(bytes);
         self.layers = self.layers.saturating_add(added);
         self.steps.push(PlanStep::Transition { inputs, effect, progress, scale });
+    }
+
+    fn push_adjustment(&mut self, fx: LayerFx, opacity: f32) {
+        let cost = fx.ops.len().max(1);
+        if self.exhausted || self.layers.saturating_add(cost) > MAX_PLAN_LAYERS || self.steps.len() >= MAX_PLAN_LAYERS {
+            self.exhausted = true;
+            return;
+        }
+        self.layers = self.layers.saturating_add(cost);
+        self.steps.push(PlanStep::Adjustment { fx, opacity });
     }
 
     fn into_layers(self, width: usize, height: usize) -> Option<Vec<PlanLayer>> {
@@ -169,6 +193,7 @@ impl FramePlan {
                 .iter()
                 .map(|s| match s {
                     PlanStep::Layers(ls) => layers(ls),
+                    PlanStep::Adjustment { .. } => 0,
                     PlanStep::Transition { inputs, .. } => inputs.iter().map(|ls| layers(ls)).sum(),
                 })
                 .sum(),
@@ -185,6 +210,7 @@ impl FramePlan {
                 .iter()
                 .map(|s| match s {
                     PlanStep::Layers(ls) => layer_side(ls),
+                    PlanStep::Adjustment { fx, .. } => fx.size.0.max(fx.size.1) as usize,
                     PlanStep::Transition { inputs, .. } => inputs.iter().map(|ls| layer_side(ls)).max().unwrap_or(0),
                 })
                 .fold((*width).max(*height), usize::max),
@@ -235,6 +261,7 @@ pub fn plan_frame(project: &Project, seq_id: ItemId, t: Tick, opts: RenderOption
     let mut layers = PlanStack::default();
     push_tracks(project, seq, t, opts, sources, 0, &mut layers);
     if layers.exhausted {
+        drop(layers);
         return FramePlan::Image(crate::render_sequence(project, seq_id, t, opts, sources));
     }
     if opts.captions {
@@ -248,6 +275,7 @@ pub fn plan_frame(project: &Project, seq_id: ItemId, t: Tick, opts: RenderOption
         }
     }
     if layers.exhausted {
+        drop(layers);
         return FramePlan::Image(crate::render_sequence(project, seq_id, t, opts, sources));
     }
     layers.finish(w, h)
@@ -260,15 +288,63 @@ pub fn is_cpu_frame(project: &Project, seq_id: ItemId, t: Tick) -> bool {
     project.sequence(seq_id).is_none_or(|seq| whole_frame_on_cpu(project, seq, t))
 }
 
+/// Keep adjustment export on its existing direct CPU path. Playback can execute the new
+/// accumulator operations, but the native export renderer still declines composite plans;
+/// building a playback plan first would repeat CPU layer rendering before that decline.
+pub fn is_cpu_export_frame(project: &Project, seq_id: ItemId, t: Tick) -> bool {
+    project.sequence(seq_id).is_none_or(|seq| {
+        seq.video_tracks
+            .iter()
+            .filter(|track| track.enabled)
+            .any(|track| track.item_at(t).filter(|item| item.enabled).is_some_and(|item| crate::is_adjustment(project, item)))
+            || whole_frame_on_cpu(project, seq, t)
+    })
+}
+
 /// The frames [`plan_frame`] does not plan: an HDR / wide-gamut sequence composites and converts
-/// on the CPU, and so does a frame with an adjustment layer or a complex transition anywhere at
-/// `t` (whole-frame fallback).
+/// on the CPU, and so does a frame with an unsupported adjustment or complex transition at `t`.
 fn whole_frame_on_cpu(project: &Project, seq: &Sequence, t: Tick) -> bool {
     !seq.settings.color.is_plain() || !layered_at(project, seq, t)
 }
 
-/// Whether the frame of `seq` at `t` can be planned as layers: no adjustment layer and no
-/// transition the compositor cannot mix itself is showing (a transition into or out of an
+/// Full-frame Normal adjustments with a bounded supported chain. Other coverage, masks and
+/// blend modes retain the existing whole-frame CPU reference path.
+fn gpu_adjustment(project: &Project, seq: &Sequence, item: &TrackItem, t: Tick, opts: RenderOptions) -> Option<(LayerFx, f32)> {
+    if item.has_opacity_masks() || crate::source_size(project, item.item)? != (seq.settings.width, seq.settings.height) {
+        return None;
+    }
+    let mt = item.effect_time_at(t);
+    let (opacity, blend) = crate::opacity_blend(item, mt);
+    if !opacity.is_finite()
+        || blend != Blend::Normal
+        || !near_identity(&motion_matrix(seq, item, crate::source_size(project, item.item)?, crate::source_par(project, item.item), mt))
+    {
+        return None;
+    }
+    let (w, h) = output_size(seq, opts.scale);
+    let cx = crate::effects::FxCtx {
+        t: mt,
+        px_scale: opts.scale,
+        seconds: (t - item.start).seconds(),
+        timecode: "",
+        clip_name: &item.name,
+        project: Some(project),
+        env: None,
+        frame_rate: seq.settings.frame_rate.as_f64(),
+        working: seq.settings.color.working,
+    };
+    let mut ops = Vec::new();
+    for effect in item.effects.iter().filter(|e| e.enabled && e.def().is_some_and(|d| !d.intrinsic)) {
+        if ops.len() >= 256 || effect.masks.iter().any(|m| m.mode != filmcraft_project::MaskMode::None) {
+            return None;
+        }
+        ops.push(FxOp::eval(effect, &cx, w, h).filter(FxOp::gpu_ok)?);
+    }
+    Some((LayerFx { size: (w as u32, h as u32), decimation: 1, ops }, opacity))
+}
+
+/// Whether the frame of `seq` at `t` can be planned as ordered operations: supported adjustments
+/// and no transition the compositor cannot mix itself is showing (a transition into or out of an
 /// adjustment layer counts, also on the side of the cut where the other clip is).
 pub(crate) fn layered_at(project: &Project, seq: &Sequence, t: Tick) -> bool {
     let adjustment = |it: &TrackItem| project.item(it.item).is_some_and(|p| matches!(p.kind, ItemKind::AdjustmentLayer { .. }));
@@ -285,7 +361,9 @@ pub(crate) fn layered_at(project: &Project, seq: &Sequence, t: Tick) -> bool {
             }
         }
         if let Some(it) = tr.item_at(t)
+            && it.enabled
             && adjustment(it)
+            && gpu_adjustment(project, seq, it, t, RenderOptions::default()).is_none()
         {
             return false;
         }
@@ -355,6 +433,16 @@ fn push_tracks(project: &Project, seq: &Sequence, t: Tick, opts: RenderOptions, 
         if !item.enabled {
             continue;
         }
+        if crate::is_adjustment(project, item) {
+            if opts.effects {
+                let Some((fx, opacity)) = gpu_adjustment(project, seq, item, t, opts) else {
+                    layers.exhausted = true;
+                    return;
+                };
+                layers.push_adjustment(fx, opacity);
+            }
+            continue;
+        }
         push_item(project, seq, item, t, opts, sources, 1.0, None, nest, layers);
     }
 }
@@ -371,7 +459,10 @@ fn nest_is_plain(project: &Project, seq: &Sequence, nested: &Sequence, ft: Tick)
         && !nested.video_tracks.iter().any(|tr| tr.enabled && tr.transitions.iter().any(|t| t.range().contains(ft) && !simple_transition(&t.effect.effect)))
         && nested.video_tracks.iter().filter(|tr| tr.enabled).all(|tr| {
             tr.transitions.iter().any(|x| x.range().contains(ft))
-                || tr.item_at(ft).filter(|i| i.enabled).is_none_or(|i| crate::opacity_blend(i, i.effect_time_at(ft)).1 == Blend::Normal)
+                || tr
+                    .item_at(ft)
+                    .filter(|i| i.enabled)
+                    .is_none_or(|i| !crate::is_adjustment(project, i) && crate::opacity_blend(i, i.effect_time_at(ft)).1 == Blend::Normal)
         })
 }
 
@@ -519,6 +610,17 @@ fn push_item(
             return;
         }
     }
+    // Keep the nest's rendered pixels and masks together, but let the compositor apply its
+    // placement. Effects and nested blending still use the CPU reference before this boundary.
+    if project.item(item.item).is_some_and(|p| matches!(p.kind, ItemKind::Sequence(_))) {
+        let tc = filmcraft_time::format_time(t, seq.settings.frame_rate, seq.settings.drop_frame, filmcraft_time::TimeDisplay::Timecode, 48_000);
+        if let Some((image, matrix, opacity, _)) =
+            crate::nested_working_layer(project, seq, item, t, opts, sources, &tc, MAX_PLAN_FRAME_BYTES.saturating_sub(out.frame_bytes))
+        {
+            out.push(PlanLayer::new(cpu_frame(image), matrix, opacity * extra_opacity, bl));
+            return;
+        }
+    }
     // CPU-rendered layer (standard effects): drawn by the GPU as a pre-rendered canvas image.
     let tc = filmcraft_time::format_time(t, seq.settings.frame_rate, seq.settings.drop_frame, filmcraft_time::TimeDisplay::Timecode, 48_000);
     if let Some((img, op2, _)) = crate::item_layer(project, seq, item, t, opts, sources, &tc) {
@@ -554,6 +656,16 @@ pub fn execute_cpu(plan: &FramePlan) -> crate::Image {
             for step in steps {
                 match step {
                     PlanStep::Layers(layers) => execute_layers(&mut canvas, layers),
+                    PlanStep::Adjustment { fx, opacity } => {
+                        let below = canvas.clone();
+                        for op in &fx.ops {
+                            op.apply(&mut canvas);
+                        }
+                        let weight = opacity.clamp(0.0, 1.0);
+                        for (adjusted, original) in canvas.px.iter_mut().zip(&below.px) {
+                            *adjusted = *original * (1.0 - weight) + *adjusted * weight;
+                        }
+                    }
                     PlanStep::Transition { inputs, effect, progress, scale } => {
                         let [a, b] = inputs.each_ref().map(|layers| {
                             let mut input = crate::Image::new(*width, *height);
@@ -616,7 +728,7 @@ mod tests {
             scale: 1.0,
         }];
         let expected = execute_cpu(&FramePlan::Composite { width: 1, height: 1, steps: steps.clone() });
-        let layers = PlanStack { steps, exhausted: false, layers: 1 }.into_layers(1, 1).unwrap();
+        let layers = PlanStack { steps, exhausted: false, layers: 1, frame_bytes: 16 }.into_layers(1, 1).unwrap();
         let got = execute_cpu(&FramePlan::Layers { width: 1, height: 1, layers });
         assert_eq!(got.px, expected.px);
         assert!(got.px.iter().any(|v| *v != 0.0));
@@ -631,5 +743,32 @@ mod tests {
         }
         assert!(stack.exhausted);
         assert_eq!(stack.layer_count(), MAX_PLAN_LAYERS);
+    }
+
+    #[test]
+    fn adjustment_only_plans_are_also_bounded() {
+        let mut stack = PlanStack::default();
+        for _ in 0..=MAX_PLAN_LAYERS {
+            stack.push_adjustment(LayerFx { size: (1, 1), decimation: 1, ops: Vec::new() }, 1.0);
+        }
+        assert!(stack.exhausted);
+        assert_eq!(stack.steps.len(), MAX_PLAN_LAYERS);
+    }
+    #[test]
+    fn retained_frame_budget_covers_layers_and_transition_inputs() {
+        let frame = Arc::new(VideoFrame::rgba_f32(1, 1, vec![0.0; 4]));
+        let mut layers = PlanStack { frame_bytes: MAX_PLAN_FRAME_BYTES - 8, ..Default::default() };
+        layers.push(PlanLayer::new(frame.clone(), Affine::IDENTITY, 1.0, Blend::Normal));
+        assert!(layers.exhausted);
+        assert_eq!(layers.layer_count(), 0);
+        let mut transition = PlanStack { frame_bytes: MAX_PLAN_FRAME_BYTES - 8, ..Default::default() };
+        transition.push_transition(
+            [vec![PlanLayer::new(frame, Affine::IDENTITY, 1.0, Blend::Normal)], vec![]],
+            filmcraft_project::find_effect("push").unwrap().instance(),
+            0.5,
+            1.0,
+        );
+        assert!(transition.exhausted);
+        assert_eq!(transition.layer_count(), 0);
     }
 }

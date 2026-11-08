@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use egui::{Align2, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use filmcraft_engine::sequence_tools::{DuplicateFrames, duplicate_frames};
-use filmcraft_project::{ClipId, ItemId, MarkerId, Sequence, TrackId, TrackItem, TrackKind};
+use filmcraft_project::{ClipId, ItemId, MarkerId, Sequence, TrackId, TrackItem, TrackKind, TransitionId};
 use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, TimeDisplay, TimeRange, format_time};
 use serde_json::{Value, json};
 
@@ -23,7 +23,9 @@ use crate::icons::{self, Icon};
 use crate::state::{ThumbnailMode, TimelineView, Tool};
 use crate::theme::Tokens;
 
-use super::timeline_hit::{EDGE_PX, EdgeKind, Grab, edge_geometry, grab_at, marker_at, marker_range_rect, marker_rect, marker_under_pointer, work_area_rect};
+use super::timeline_hit::{
+    EDGE_PX, EdgeKind, Grab, edge_geometry, grab_at, marker_at, marker_range_rect, marker_rect, marker_under_pointer, transition_target, work_area_rect,
+};
 pub use super::timeline_hit::{Hit, ROLL_PX, hit, selection_trim_kind};
 
 mod clips;
@@ -53,8 +55,11 @@ pub(crate) use menus::{CLIP_MENU, EDIT_POINT_TYPES};
 use ruler::draw_top;
 pub use ruler::ruler_steps;
 use scrollbars::{vertical_scrollbar, zoom_scrollbar};
+use snap::selected_transition_grab;
 pub(super) use snap::snap;
 pub use snap::{hit_json, locate};
+#[cfg(all(test, not(target_arch = "wasm32")))]
+use waveforms::peak_spawn_result;
 pub(crate) use waveforms::request_peaks;
 #[cfg(test)]
 use waveforms::{source_peaks, waveform_display_gain};
@@ -115,7 +120,9 @@ pub struct TlState {
     duplicates: Option<(DuplicatesKey, DuplicateMarkers)>,
     /// The markers being worked out on a background thread, and where the thread leaves them.
     duplicates_pending: Option<DuplicatesKey>,
-    duplicates_done: Arc<Mutex<Option<(DuplicatesKey, DuplicateMarkers)>>>,
+    duplicates_done: Arc<Mutex<Option<(DuplicatesKey, Result<DuplicateMarkers, String>)>>>,
+    /// Retained across cache resets so changing projects cannot accumulate analysis workers.
+    duplicates_running: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TlState {
@@ -226,6 +233,13 @@ pub enum Drag {
         from: Tick,
         start: Tick,
         end: Tick,
+    },
+    PlayheadZoom {
+        from: Pos2,
+        start_pps: f64,
+        start_scroll: f64,
+        anchor: f64,
+        anchor_x: f32,
     },
     Pan {
         last: Pos2,
@@ -547,7 +561,13 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         // clip drag also shows where the drop will carry its transitions (those whose clips all
         // move to one track by one offset): a plain move draws them on their destination track
         // right away, a copy adds a ghost beside the copies while the originals stay at home.
-        for trn in &tr.transitions {
+        let selected_bars = app.session.state.transition_selection.clone();
+        for trn in tr
+            .transitions
+            .iter()
+            .filter(|transition| !selected_bars.contains(&transition.id))
+            .chain(tr.transitions.iter().filter(|transition| selected_bars.contains(&transition.id)))
+        {
             let carried = move_transition_preview(app, seq, trn);
             // the transition's home span (a transition dragged by an end still takes over)
             let (start, end) = match &app.tl.drag {
@@ -1080,5 +1100,22 @@ mod ruler_tests {
         }
         let (minor, label) = ruler_steps(1.0, i64::MAX);
         assert!(minor >= 1 && label >= 1 && label % minor == 0, "an unrepresentable rate: tick {minor}, label {label}");
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod worker_failure_tests {
+    use super::*;
+    #[test]
+    fn waveform_spawn_failure_is_reported_and_clears_pending_work_without_panicking() {
+        let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
+        let key = (ItemId(1), 0);
+        app.tl.peaks_pending.lock().unwrap().push(key);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            peak_spawn_result(&mut app, key, Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "synthetic thread exhaustion")))
+        }));
+        assert!(outcome.is_ok());
+        assert!(app.tl.peaks_pending.lock().unwrap().is_empty());
+        assert!(app.ui.status.contains("synthetic thread exhaustion"));
     }
 }

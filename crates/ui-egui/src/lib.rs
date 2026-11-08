@@ -39,10 +39,14 @@ pub mod crash;
 pub mod credits;
 pub mod dock;
 mod dock_ui;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod pdf_reference;
 pub use dock_ui::area_id as dock_area_id;
 /// Thumbnail textures kept before the least recently used are freed (each is up to 320 px wide).
 const MAX_THUMB_TEXTURES: usize = 512;
 
+pub mod console;
+pub mod flight_recorder;
 pub mod frames;
 pub mod graphics_notice;
 pub mod header;
@@ -167,6 +171,7 @@ pub(crate) enum ImeComposition {
 }
 
 pub struct FilmcraftApp {
+    pub flight_recorder: flight_recorder::FlightRecorder,
     pub session: Session,
     pub ui: UiState,
     pub tokens: Tokens,
@@ -179,6 +184,8 @@ pub struct FilmcraftApp {
     pub hooks: HostHooks,
     pub dialog: Option<Dialog>,
     pub(crate) updates_rt: updates_ui::Runtime,
+    pub(crate) assistants: console::assistants::Manager,
+    pub(crate) api_setup: console::api_settings::Editor,
     pub file_dialogs: panels::file_dialogs::FileDialogState,
     /// The native file dialog the host is showing ([`Self::pick`]).
     native_dialog: Option<native_dialogs::PendingDialog>,

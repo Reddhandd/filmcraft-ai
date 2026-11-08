@@ -80,6 +80,70 @@ fn render(s: &Scene) -> Image {
     render_sequence(&s.p, s.seq, R.tick_of(12), RenderOptions::default(), &s.map)
 }
 
+#[test]
+fn ordered_adjustment_plan_matches_the_sequence_renderer() {
+    let mut s = scene(4);
+    let red = matte(&mut s.p, &mut s.map, [0.8, 0.1, 0.2, 1.0]);
+    let blue = matte(&mut s.p, &mut s.map, [0.1, 0.2, 0.8, 0.5]);
+    place(&mut s.p, s.seq, 0, red);
+    let first = adjustment(&mut s.p, s.seq, 1);
+    fx(&mut s, first, "invert");
+    let upper = place(&mut s.p, s.seq, 2, blue);
+    clip(&mut s, upper).effect_mut("motion").unwrap().params.get_mut("scale").unwrap().value = ParamValue::Float(50.0);
+    let second = adjustment(&mut s.p, s.seq, 3);
+    fx(&mut s, second, "crop");
+    clip(&mut s, second).effects.iter_mut().find(|e| e.effect == "crop").unwrap().params.get_mut("left").unwrap().value = ParamValue::Float(25.0);
+    for scale in [1.0, 0.5] {
+        for opacity in [0.0, 37.5, 100.0] {
+            clip(&mut s, second).effect_mut("opacity").unwrap().params.get_mut("opacity").unwrap().value = ParamValue::Float(opacity);
+            let opts = RenderOptions { scale, ..Default::default() };
+            let plan = crate::plan::plan_frame(&s.p, s.seq, R.tick_of(12), opts, &s.map);
+            assert!(!crate::plan::is_cpu_frame(&s.p, s.seq, R.tick_of(12)));
+            assert!(crate::plan::is_cpu_export_frame(&s.p, s.seq, R.tick_of(12)));
+            let crate::plan::FramePlan::Composite { steps, .. } = &plan else { panic!("supported adjustments must remain ordered GPU operations") };
+            assert_eq!(steps.iter().filter(|step| matches!(step, crate::plan::PlanStep::Adjustment { .. })).count(), 2);
+            let expected = render_sequence(&s.p, s.seq, R.tick_of(12), opts, &s.map);
+            let actual = crate::plan::execute_cpu(&plan);
+            let error = expected.px.iter().zip(&actual.px).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            assert!(error < 1e-5, "scale={scale}, opacity={opacity}, error={error}");
+            if opacity == 100.0 {
+                assert_eq!(actual.get(0, 0), [0.0; 4], "replacement clears the original");
+            }
+        }
+    }
+    let opts = RenderOptions { effects: false, ..Default::default() };
+    let plan = crate::plan::plan_frame(&s.p, s.seq, R.tick_of(12), opts, &s.map);
+    assert!(matches!(plan, crate::plan::FramePlan::Layers { .. }));
+    assert_eq!(crate::plan::execute_cpu(&plan).px, render_sequence(&s.p, s.seq, R.tick_of(12), opts, &s.map).px);
+}
+
+#[test]
+fn unsupported_adjustment_coverage_keeps_the_exact_cpu_fallback() {
+    let mut s = scene(2);
+    let red = matte(&mut s.p, &mut s.map, [1.0, 0.0, 0.0, 1.0]);
+    place(&mut s.p, s.seq, 0, red);
+    let adj = adjustment(&mut s.p, s.seq, 1);
+    fx(&mut s, adj, "invert");
+    for mode in ["motion", "mask", "blend", "unsupported", "oversized-chain"] {
+        let original = clip(&mut s, adj).clone();
+        match mode {
+            "motion" => clip(&mut s, adj).effect_mut("motion").unwrap().params.get_mut("scale").unwrap().value = ParamValue::Float(50.0),
+            "mask" => clip(&mut s, adj).effect_mut("opacity").unwrap().masks.push(Mask::new("coverage", MaskPath::rect(0.0, 0.0, 160.0, 180.0))),
+            "blend" => clip(&mut s, adj).effect_mut("opacity").unwrap().params.get_mut("blend").unwrap().value = ParamValue::Choice(3),
+            "unsupported" => fx(&mut s, adj, "basic_3d"),
+            _ => {
+                for _ in 0..256 {
+                    fx(&mut s, adj, "invert");
+                }
+            }
+        }
+        let plan = crate::plan::plan_frame(&s.p, s.seq, R.tick_of(12), RenderOptions::default(), &s.map);
+        assert!(matches!(plan, crate::plan::FramePlan::Image(_)), "{mode}");
+        assert_eq!(crate::plan::execute_cpu(&plan).px, render(&s).px, "{mode}");
+        *clip(&mut s, adj) = original;
+    }
+}
+
 fn near(a: [f32; 4], b: [f32; 3], tol: f32) -> bool {
     (0..3).all(|k| (a[k] - b[k]).abs() < tol)
 }

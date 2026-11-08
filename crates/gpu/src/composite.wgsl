@@ -392,6 +392,14 @@ fn fs_blend(in: VOut) -> @location(0) vec4<f32> {
 
 // ---- final pass: accumulator (linear premul) over black → sRGB target
 
+// A Normal adjustment replaces the lower-track composite. Alpha-clearing effects must clear
+// those pixels too; drawing the adjusted image with source-over would retain the old picture.
+@fragment
+fn fs_adjustment(in: VOut) -> @location(0) vec4<f32> {
+    let p = vec2<i32>(in.pos.xy);
+    return mix(textureLoad(backdrop, p, 0), textureLoad(tex0, p, 0), clamp(u.p0.x, 0.0, 1.0));
+}
+
 @group(0) @binding(0) var accum: texture_2d<f32>;
 
 @vertex

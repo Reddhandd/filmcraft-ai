@@ -190,7 +190,10 @@ fn a_single_frame_source_range_starts_at_the_marked_last_frame() {
     h.state_mut().session.execute("project.setMarks", json!({"item":5,"in":last.0,"out":last.0})).unwrap();
     h.state_mut().play_source_range(false, false).unwrap();
     assert_eq!(h.state().session.state.source_playhead, last);
+    // First-paint font loading can put the host clock ahead of the harness clock.
+    // Advance both clocks so initialization cost cannot consume the simulated interval.
     for _ in 0..4 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
         h.step();
     }
     assert!(!h.state().source_playback.clock.playing);

@@ -1,11 +1,334 @@
 # FilmCraft Roadmap
 
+Current owner scope: finish alpha stability and the requested Console workflows. Premiere
+project import and broader portability are on hold until the owner explicitly confirms a change.
+
+- **Console Studio layout delivered and native-qualified (2026-11-02).** The signed
+  `58b92a2f` demo passed native appearance, hover-function and keyboard-focus label checks,
+  settings disclosure and API-disablement checks. It opens with the existing memory profile and
+  session lock preserved. Output precedes the composer, session actions share a toolbar, memory
+  sits beside Save Assistant, and settings/advanced commands start collapsed. A reported physical
+  Return no-op later passed the owner's healthy idle-state retest; its original transient cause remains unconfirmed.
+- **Voice renewal transports successfully; conversational recall failed (2026-11-03).**
+  `3b9412b2` passed the source-stable gate (4,394 passed / 51 skipped / 49 WASM crates) and
+  packaged warning/55-minute renewal kept the same thread ID while cancelling unfinished voice
+  work. The owner reported that the replacement voice did not remember the preceding conversation.
+  Thread identity alone is not continuity acceptance. A short Voice Off/On or Codex reconnect
+  suffices for the next recall test; another hour-long wait is unnecessary for this defect.
+  The repair is locally committed as `245ef2cc`: bounded role-bearing startup history and assistant
+  identity preserve no-replay rules and separate new conversations/projects. Generated-speech
+  WebRTC testing reproduced lost recall with empty startup history, then retained the phrase and
+  exact editing role with the handoff, without physical audio devices. The final source-stable
+  gate passed 4,400 tests (52 skipped) and 49 WASM crates. A final generated-speech retest also
+  passed with Finder-like PATH. The matching signed replacement passed a headless generated-project
+  save-copy check and preserves the existing memory/settings profile. Short packaged Voice Off/On
+  and full Console reconnect recall/role/no-replay acceptance are still required.
+
+- **Active Codex turn deadline defect reproduced (2026-11-04).** Owner recurrence in the
+  signed reconnect demo had working voice but no further editing, with repeated
+  `responseStreamDisconnected` notices. The native project-context guard was clear. Separately,
+  a working turn started at 00:13:40.397 UTC and FilmCraft terminated its worker at
+  00:23:40.402 UTC; native edits were still succeeding at 00:23:34.721 UTC. The absolute
+  ten-minute deadline therefore killed an active task. The repair candidate watches real task
+  progress instead, cancels a genuinely silent task once, and waits up to 30 seconds for a real
+  terminal acknowledgement before reporting failed recovery. Voice traffic, unrelated turns and
+  upstream retries do not refresh task liveness; no old edit is replayed. Structured upstream HTTP
+  status is retained when supplied, without logging headers or arbitrary error detail payloads.
+  This does not establish why the upstream stream retries after reconnect; that failure and the
+  owner's partial-detail recall remain open. Candidate qualification is in progress, and the
+  running owner demo/project is unchanged. The repair subsequently passed its source-stable
+  gate (4,405 tests passed, 52 skipped; 49 WASM crates), and the matching signed C36 demo
+  was delivered. The owner still reproduced the reconnect editing failure in that build;
+  the inactivity repair is not evidence that reconnect recovery is resolved.
+
+- **Persistent Reference Library implementation (owner requested 2026-11-05).** Eight
+  owner-selected filmmaking/editing/animation books are privately copied and indexed on D:
+  1,665 physical pages, 2,367 passages, with matching source/copy SHA-256 hashes. A source
+  implementation adds background import, local term search, bounded cited retrieval through the
+  existing Console reference tool, shared enable/remove controls and recovery with a permanent
+  removal ledger. Four books required a local page-preserving extraction using installed
+  Poppler; it is not bundled or a product dependency. The running demo is unchanged until the
+  matching build is installed. Commit `097dda3b` passed the full gate (4,410 tests,
+  52 skipped; 49 WASM crates); the matching signed demo passed its headless save-copy
+  check and preserved memory/library data during packaging. Twelve sampled physical-page
+  citations passed an independent cross-check. Native controls and live AI retrieval remain
+  unverified. A further source candidate adds project/assistant-specific selections and
+  scoped retrieval; its full gate and packaged/native checks remain pending. No
+  full-book upload, model training or OCR is claimed. See [Reference Library](docs/reference-library.md).
+
+- **Direct API connections: disabled / unresolved (owner decision, 2026-11-01).** Future builds
+  offer Codex and Desktop ChatGPT. The preserved API implementation is not an active alpha task.
+  Live marker editing and native Undo passed, but the three-frame capture workflow failed and
+  remains unresolved. No further API integration or paid testing is scheduled. See
+  [API connection status](docs/api-connection-status.md).
+
+- **Project Assistants are qualified in the signed `834634e9` build:** changed-context
+  checkpoints every 15 minutes, milestone/close saves, named reusable assistants, project isolation,
+  cross-build restoration and no edit replay passed their recorded checks. Matching native tests also
+  verified automatic recovery after a persistence lock is released, previous-checkpoint recovery with
+  a visible warning, and actionable failure when both checkpoints are invalid. The source-stable
+  gate passed 4,358 tests (50 skipped) and 49 WASM crates. Evidence:
+  `target/project-assistants-wakeup-native-20261101/native-acceptance-result.json`.
+
+- **Named assistant autosave requested (2026-11-04).** The owner reports that a fresh
+  session immediately loaded the assistant/controller instructions and understood the current
+  task, although the saved information was slightly behind. Add an explicit Autosave option
+  beside the selected named assistant. Existing 15-minute project checkpoints do not automatically
+  replace the reusable named assistant. Autosave must show its last successful save and failures,
+  preserve a previous version, and keep project-specific history isolated rather than copying it
+  into other projects through the reusable assistant. Qualify updated assistant restoration in a
+  fresh session without replaying edits. A [source candidate](docs/project-assistant-autosave.md)
+  now implements the opt-in, bounded background updates and visible status. Full-gate and
+  matching packaged/native qualification are pending; existing-session reconnect/edit recovery
+  remains open.
+
+  The manual save action now uses **Update Assistant** for an existing name in the source
+  candidate, retaining that catalog entry's name and updating its current instructions.
+  A new name still creates a separate assistant; stale-write checks and project-history
+  isolation remain in place. This UI change is included in the signed `097dda3b` demo;
+  native review remains pending.
+
+- **New owner timeout reproduction:** after voice times out, cancelling the unfinished task
+  beside Send permits voice reconnect. A source candidate tracks voice-originated turns and uses
+  the existing interrupt protocol once when voice fails; it waits for actual task completion and
+  leaves ordinary text tasks alone. Targeted/controller regressions and the source-stable
+  `0978bfe1` full gate passed. Matching packaged active-task timeout/reconnect acceptance remains pending.
+
+- **Context-refresh edit block:** owner logs show successful edits through revision134, then
+  memory operations followed by a blocked playhead command while inspection remained available.
+  A regression reproduces self-authored assistant memory unnecessarily requesting a context refresh
+  that waits for voice to end. The source repair removes that invalidation without clearing genuine
+  project-change guards. The after-fix full gate and matching private native idle memory-update/edit
+  check passed. Matching `58b92a2f` native acceptance also passed an assistant checkpoint during
+  active voice followed by an AI-requested marker edit in the same conversation, with no context
+  block. This qualifies that memory-refresh defect; it does not prove unrelated unfinished-task
+  reconnect cases. Evidence: `target/console-polish-demo-20261101/active-voice-context-native-result.json`.
+
+- **Current implementation and verification:** in-app masked API key/model configuration,
+  hosted live web search at Codex launch/resume, and inline Source monitor capture passed the
+  source-stable `0978bfe1` gate (4,369 tests; 50 skipped). Matching signed native checks passed
+  visible/hidden Source capture through the actual Console MCP route, unchanged playheads/selection,
+  memory-control placement, and actionable missing-model/key API errors. Source images were delivered
+  inline without screenshot files; actual AI interpretation of this new Source fixture is not claimed.
+  The replacement demo preserves the existing memory profile and saved session lock; original memory
+  and lock hashes also matched after launch.
+
+- **Historical API startup failure: resolved, then API deferred.** The Desktop-only
+  `connection_rebind` catalog mismatch was repaired. The signed `b1a36936` package passed native
+  dummy-key startup and live owner-key edit/Undo checks. Its three-frame image workflow did not
+  complete, so direct API connections are disabled in future builds and remain unresolved rather
+  than accepted for alpha. No API voice support is claimed.
+
+- **Desktop reconnect:** the updated helper and explicit `connection_rebind` passed the owner's
+  same-chat reconnect check in a new conversation. Older chats whose cached tool catalog lacks
+  that tool remain a migration limitation; restarting MCP alone did not recover the tested old chat.
+  The owner's JSON handoff to a new chat remains the recorded workaround. Background inspection
+  passed native focus checks and owner confirmation that ChatGPT remained in front.
+
+- **Speaking voice, session lock and interruption:** the owner heard Cove and Use Default in
+  the matching demo; the original Sol preference was restored. Lock Session during active voice
+  preserved the exact conversation and ongoing call. Exact-session reopening and headphone
+  interruption passed owner acceptance. No silent new-conversation fallback is allowed.
+
+- **Voice during export:** a representative attended export completed 3,201 frames in 164.4
+  seconds with more than 84 seconds of voice overlap. The owner reported small baseline breakup
+  that neither improved nor worsened during export, and reports that behavior with Codex rather
+  than Desktop. This qualifies no export-induced worsening; the origin of the baseline breakup
+  remains unproved and is tracked as a follow-up observation.
+
+- Style-preset native Import and Load passed on a generated preset: the visible selection and
+  effective creative context matched exactly, and the timeline/project stayed unchanged. Voice,
+  provider access and screenshot files were not involved in that check.
+
+- Input-device discovery/capture recovery was repaired after a signed private app hung
+  while opening disconnected Console. A retained sample shows the main thread waiting in
+  microphone channel discovery inside CoreAudio. Discovery is now cached on a bounded worker;
+  capture startup has a deadline, cancelled callbacks are gated, and Stop/Drop do not join a
+  blocked driver. Console and Voice-over settings refresh pending metadata without changing
+  unsaved settings. The old-code regression fails as expected; integrated input (13), UI (2)
+  and engine (9) tests pass. The full source-stable gate passed (4,203 tests, 50 skipped;
+  49 WASM crates). The signed private app passed native Console open/close/reopen with Codex
+  disconnected, 12 detected channels and unchanged project/preferences. Physical capture and
+  microphone-only mute acceptance later passed in the attended healthy-device scope. Physical
+  one-hour endurance and arbitrary driver-failure recovery are not claimed.
+
+- Colored-shadow continuity is qualified in the recorded synthetic CPU/GPU/native scope. A synthetic near-black ramp reproduced a
+  large channel jump after negative black-point adjustment and shadow lift. The reference,
+  planned-effect and shader paths now share a black-anchored shadow response below 5% of the
+  encoded grading signal, preserving the existing weight above that toe. The old-code regression
+  failed; ten focused CPU/HDR tests and both actual-device GPU white-balance cases pass.
+  The source-stable full gate passed (4,189 tests, 50 skipped; 49 WASM crates);
+  signed native Program-monitor review of generated dark ramps also passed at Full and 1/2
+  resolution. This isolates a mathematical defect without claiming reproduction of the owner’s exact frame.
+
+- Playback is owner-accepted for alpha; the difficult graded four-view stress case is a later
+  roadmap task, not a blocker for the current goal. Nested-placement optimization remains
+  documented with its scoped evidence. A paired cold-start measurement
+  at 55 seconds showed that removing only opacity masks reduced drops modestly (52% to 46%);
+  masks alone are not the remaining bottleneck. The candidate preserves CPU nested composition,
+  effects and masks while deferring placement of axis-aligned, full-cover nests to the GPU.
+  Actual GPU testing rejected visible rotated/minified edges; those retain CPU placement.
+  Retained frame storage is bounded, and upload-cache validation now covers byte limits and
+  preservation of every layer in a current batch. The source-stable full gate passed
+  (4,185 workspace tests, 50 skipped; 49 WASM crates). Signed builds and matched native
+  measurements are complete, but the difficult 55-second interval remains unresolved: about
+  60% baseline versus 62% repaired-build video drops at half resolution, with healthy audio
+  callbacks and zero underruns. This scoped test does not qualify smooth playback; the owner
+  separately reports substantial overall improvement in the demo.
+
+- Recovery working-view restoration is in validation. A two-process abrupt-stop test on a
+  private complex project preserved the full project and Undo/Redo, but reopened sequence 11
+  instead of the working sequence 1042. Journals now include validated sequence tabs, playheads
+  and timeline views, including changes that do not advance the edit revision. The focused
+  reproduction passes. A stalled-writer regression also exposed per-frame queue growth; the
+  candidate coalesces these into one latest view and one notification per snapshot. Three mailbox,
+  22 autosave and six sequence-tab tests pass, with strict engine lint. The rebuilt two-process test
+  restores the exact project, working view and Undo/Redo with originals unchanged. The complete
+  source-stable gate passed (4,179 tests, 50 skipped; 49 WASM crates). The signed Recovery View
+  package also passed native recovery after an owned-process abrupt stop: the saved project/view
+  matched exactly, including active sequence and playhead, and recovered Undo/Redo matched the
+  expected project states. Physical power-loss durability remains unqualified.
+
+- Larger selected PDFs are in validation: contract 8 adds asynchronous native admission and a
+  read-only `reference_pdf` page/ticket tool. Parsing runs in supervised child processes with bounded
+  queues, output, input, stream and retained-object/structure budgets. Loaded PDFs remain selected
+  after Send until Remove or project switch. The helper indexed the original 216-page Kodak and
+  119-page Introduction to Film PDFs and a generated 22.3 MB/448-page illustrated fixture. Focused
+  lifecycle/MCP tests, the full source-stable gate and signed app helper checks passed. Native Add
+  Files during connected Codex and direct packaged MCP page reads passed, but the later provider
+  page request exposed an expired pooled bridge connection. The fresh-connection repair passed
+  the full gate and signed native/provider qualification: exact interior/final pages after 130 seconds
+  idle, followed by native Remove and stale-snapshot rejection. Native Finder PNG/PDF drop into
+  connected Console also passed, including 448-page PDF readiness and an unchanged project.
+
+- Selected PNG reference delivery during voice is in validation: contract 7 adds a read-only
+  `reference_image` tool for existing user-selected in-memory snapshots. Stable identities and
+  project epochs reject stale requests; bounded PNG delivery retains transparency and creates no
+  image files. Focused/transport tests and the full source-stable gate passed, and a separate signed
+  package passed native Add Files, packaged MCP pixels after source-copy deletion, and typed-provider
+  image interpretation. Native Return/Shift+Return and disconnected draft preservation also passed.
+  Actual voice use remains pending.
+
+- Native audio startup safety is in validation: an owned release test blocked the main thread
+  in CoreAudio output-device initialization. Output construction, configuration, stream operations,
+  recovery and device enumeration now use one guarded bounded worker. The UI reads cached state;
+  cancellation silences stale callbacks, and validated program frames drive the clock. Nine synthetic
+  blocked-driver/panic/cancellation/format tests, strict Clippy and the full source-stable gate passed.
+  A signed native startup/window/menu test passed (3.4-second control readiness; 30 probes within
+  13 ms). This is one startup, not repeated driver-failure recovery or playback qualification.
+
+- Live unrendered playback is accepted for alpha; this retained measurement history describes deferred stress limits: a private project copy reproduced heavy video drops
+  with the adjustment grade enabled while audio and UI remained responsive. Disabling the adjustment
+  reduced but did not remove the drops; it is a diagnostic comparison, not a fix. GPU Noise support
+  now preserves the production CPU field, grain size and exact timestamp seed on Metal. Ordered
+  adjustment-composite acceleration passed its full source-stable gate and signed native measurement.
+  At the same 80-second start and half-resolution setting, the enabled-grade candidate reduced
+  dropped frames from 68% to 4% over ten seconds, with zero audio underruns. A full-song run
+  measured 6.7% dropped frames, zero audio underruns and zero failed frame jobs, ending naturally.
+  Its wrapper timed out waiting for a redundant final review marker; retain that failed harness
+  result separately from the completed measurement. Residual drops and transformed-nest CPU
+  processing remain open; this is not a claim of universally smooth playback. See [test scope](docs/testing.md#live-unrendered-playback-and-gpu-noise-2026-10-30).
+
+- 2026-10-30 graphics stability: the macOS drawable-timeout policy repair passed the full local
+  gate and native QuartzCore property regression, and is packaged separately as Graphics Recovery.
+  The signed package passed native hide/restore, background control and resize qualification;
+  the original starvation trigger remains unproven. See [evidence and limits](docs/testing.md#bounded-macos-drawable-acquisition-2026-10-30).
+
+- 2026-10-30 Console continuity in validation: Connect chooses the previous saved conversation after
+  restarting FilmCraft and rebinds it to the current project context. New Conversation stays explicit. Failed resume
+  reports recovery choices and never automatically creates a replacement thread or replays edits.
+
+- 2026-10-30 stability priority: investigate voice expiry followed by short-lived reconnects,
+  disabled Voice controls, and failure to restart voice even after Codex reconnect. Owner confirmed
+  top priority; source repairs, accelerated provider lifecycle testing and the local combined gate
+  passed. The signed local package also passed large-project inspection, edit/Undo, owned Codex-child
+  failure and reconnect qualification. A real-provider generated-audio test now passed the actual one-hour expiry, remote Stop
+  acknowledgement, worker release, same-conversation voice restart and subsequent text reply.
+  Physical microphone/speaker health, native controls and mute continuity remain unqualified.
+  See [reported sequence and acceptance](docs/gaps.md#priority-voice-expiry-and-failed-reconnect-recovery-2026-10-30).
+
+- Larger persistent Console memory is in validation following the owner's 16 KB capacity note.
+  Contract 9 separates a 1 MiB saved store from bounded session excerpts, UTF-8 read pages,
+  literal search and snapshot-guarded small edits. Encoded replies are byte-budgeted; unsaved
+  drafts, detected disk conflicts and failed commits preserve the saved notes. The full source-stable
+  gate passed (4,173 tests, 50 skipped; 49 WASM crates), as did signed MCP transport checks. Native
+  editing, saving and reopening 33 KB of Unicode notes passed an exact saved-byte comparison.
+  Owner notes and projects were not migrated or changed.
+
+- Console selection/context-menu repair is in validation following the owner's report that
+  right-clicking highlighted output removes the highlight. A pointer-gesture regression reproduced
+  the failure. The repair retains egui's shared Unicode/multi-message selection and routes menu
+  Copy through it, with whole-message fallback when nothing is selected. All 63 Console tests passed,
+  including exact partial/Unicode/multi-message clipboard checks and unchanged draft/project state.
+  The full source-stable gate and signed native partial-selection acceptance passed: the highlight
+  survived right-click, Copy/Paste transferred only the selected text into the draft without Send,
+  and transcript/project state stayed unchanged. Owner projects were not changed.
+
+- 2026-10-30 source-qualified Console contract 6: timeline waveform images with bounded
+  time/zoom/identity context, focused visible ranges and no retained screenshot files; microphone-only
+  mute and output Copy/Paste into the draft. The full gate passed 4,074 tests (50 skipped).
+  The corrected signed Timeline Recovery package passed native/MCP image delivery and actual Codex
+  waveform interpretation, plus native Copy/Paste without automatic send. Physical microphone mute
+  acceptance remains pending. See [scope and acceptance](docs/gaps.md#planned-ai-timeline-screenshots-for-waveform-inspection-2026-10-30).
+
+- 2026-10-30 diagnostics in validation: bounded command/request/timing/outcome breadcrumbs,
+  revision/document identity and fixed Codex setup metadata. Prompts and payloads are omitted.
+  Full source checks and the signed package's native diagnostics-header qualification passed.
+
+- 2026-10-30 font previews in validation: shared actual-typeface rows for graphics, captions,
+  template controls and font replacement. Temporary font loading avoids permanent byte-cache
+  growth; native discovery/rendering use bounded guarded queues and a bounded texture cache.
+  Full gates with/without optional fonts passed (4,098 tests each; 49 WASM crates).
+  Native Graphics Properties previews, scrolling, selection and Undo passed; other selectors share
+  the tested worker and retain their automated coverage. No readiness percentage change.
+
+- 2026-10-30 timeline capture acceptance found a canonical panel-ID mismatch: packaged MCP
+  delivered PNG pixels but omitted waveform context and rejected focused ranges. The repair
+  shares the actual panel identity between admission and capture. All 4,100 tests and the full gate
+  passed. Native full/focused capture, offscreen rejection, unchanged project/view checks and actual
+  Codex interpretation of generated waveform intervals passed without retaining screenshot files.
+
+- Export estimate accuracy: explicit finalization phase is implemented for container/audio flush,
+  file writes and preview publication. Media-unit counters remain real; finalization has no invented
+  zero-second estimate. Focused synthetic-tail, stepped-export/cancellation and UI/queue tests passed.
+  The source-stable gate passed. A signed release CLI exported the entire 106.77-second complex
+  sequence at 1080×1920/30 fps with audio in 844.78 seconds. Independent decoding read all 3,203
+  video frames and 5,005 AAC frames without errors; project/view snapshots stayed unchanged.
+  Across 2,586 ETA samples from 10–90% completion, median absolute relative error was 6.76% and
+  the 90th percentile was 31.58%. This measures one variable-cost workload, not universal accuracy;
+  no workload-specific multiplier was introduced. The owner accepted these ETA limits for alpha;
+  further numerical accuracy across workloads is deferred rather than a current goal blocker.
+
+- Console draft keyboard handling is in validation: Return uses the existing Send command,
+  Shift+Return adds a newline, and IME composition, held-key repeats and other fields cannot submit.
+  Provider failure keeps the draft. The full source-stable gate passed 4,109 tests (50 skipped)
+  and 49 WASM crates; native packaged Return/Shift+Return and disconnected draft checks passed.
+
+- Updated Console test-note status: larger PDFs now have bounded asynchronous admission and
+  page retrieval, with signed native Add Files acceptance for a generated 22.3 MB/448-page file.
+  Native connected-session PNG/PDF drop passed as well. Playback is accepted by the owner for alpha; the
+  difficult four-view stress case stays on the later performance list. See the detailed evidence
+  and remaining limits above rather than treating the earlier 512 KiB limit as current.
+
+- 2026-10-29 consolidation: the native Command Console is included in local main. Worker completion,
+  autosave failure reporting, bounded document reads, sequence identity validation and failed-edit/save
+  transactions passed the combined local gate and native/MCP smoke. Benchmark qualification reports incomplete coverage
+  and separates decoding, encoding and GPU rendering. These repairs do not change the release stage.
+
+The parity percentages and Opus 5.5 time estimates below are historical estimates from the
+2026-10-10 assessment. They have not been recalibrated for the current code or current models.
+
+- 2026-10-29 console qualification: `filmcraft-console/3` in the separate console checkout passed real-Codex import/sequence placement, playhead/selection, direct grouped edits with native Undo/Redo, full-song candidate analysis and Beat Cuts, first-save continuity, reconnect, actual Resume-picker use after restart, and an eight-second H.264/AAC export with all 240 frames decoded. Routine edits need no Apply/Reject. This corrects the earlier limited-command/unsaved-resume record; musical match application/phrase/boundary/drift acceptance and a full-song render remain unverified scopes. No release-stage or readiness-percentage change. See [qualification and limits](docs/testing.md#local-codex-console-qualification).
+
+- 2026-10-25 custom-workflow migration in validation: dedicated Marquee, Timeline Return to Zero, Option-middle zoom, Tools shortcut-editor access, guarded Close All Projects, opt-in persistent Undo and local Flight Recorder. No readiness percentage or release-stage change is claimed. Worker lifecycle/resource-exhaustion repairs are included in validation.
+
 - UI.6: Compact Source and Program monitors separate timecodes from view settings and retain Source drag choices. Transport controls use the shared toolbar sizing helper, with overflow actions in an operable More menu and a scrolling fallback at tiny widths.
 - UI.3: Panel tabs, edge splits, tab reordering and floating groups use the shared docking model and drop resolver. Floating geometry is saved with named workspaces while legacy layout JSON remains readable. Dock dividers use bounded shared geometry and keyboard-accessible resize handles. Tools and dock tabs expose actual widget focus, paint focus outlines, and support keyboard traversal/activation. Control input reaches focused widgets in background windows; optional input isolation supports unattended validation. Existing workspace trees and saved layout formats are retained.
 
-**Stage: alpha** · next: beta, ~19 points of ready-for-real-work and ~400–700 h away, plus opening Premiere's `.prproj` ([why](docs/target-app-parity.md#stage); passes the [core-workflow gate](docs/roadmap.md#alpha-gate))
+**Stage: alpha** · Beta still requires reliable daily workflows and `.prproj` import
+([criteria](docs/target-app-parity.md#stage), [core-workflow gate](docs/roadmap.md#alpha-gate)).
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-22 · **Change:** minor (ProRes alpha final-run conformance and native macOS validation) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-10-29 (implementation audit; parity estimates 2026-10-10) · **Last updated:** 2026-10-29 · **Change:** major (local consolidation, safety boundaries and current qualification evidence) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 Progress toward parity with Adobe Premiere Pro. This page is the summary; the detail is in
 [docs/target-app-parity.md](docs/target-app-parity.md) (assessment, methodology, calibration),
@@ -22,7 +345,7 @@ Progress toward parity with Adobe Premiere Pro. This page is the summary; the de
 | **Essentials user** | **~60%** | Import, cut, title, music, export at default settings, discounted ×0.88 launch / stability, ×0.90 discoverability, ×0.95 opening files people send ([method](docs/target-app-parity.md#essentials-user)) |
 | **To beta** | **~400–700 Opus 5.5 agent-hours** | Estimated, calibrated from this repo's PR history |
 | **To full parity** | **~1,550–2,750 agent-hours** | ~70% parallelizes; plugins, AI models, native-speaker review and some hardware need a human |
-| Code (measured) | 45 crates, ~343k lines of Rust, 2,520 tests, 268 merged PRs, 69 authors | `git`, `gh`, `grep` |
+| Code (measured 2026-10-29) | 50 library crates + 3 apps, ~435k lines of Rust including tests and specification tables; combined local gate: 4,017 tests passed, 49 explicitly skipped | Cargo manifests, Git source inventory, [qualification and coverage limits](docs/testing.md#consolidated-main-validation-2026-10-29) |
 
 Two numbers, because they answer different questions. The gap between them is the work that
 matters most now: breadth is nearly done, depth is not.
@@ -48,7 +371,7 @@ Method and calibration: [docs/target-app-parity.md](docs/target-app-parity.md#th
 | Hardware acceleration | ~45% | 120–200 | [hardware-parity.md](docs/hardware-parity.md) |
 | Localization | ~35% | 150–230 | [localization-parity.md](docs/localization-parity.md) |
 | Performance | ~55% | 60–120 | [performance.md](docs/performance.md) |
-| Stability | ~45% | 60–120 | [gaps.md G4](docs/gaps.md#g4-crashes-at-start-up-and-no-test-ci-on-pull-requests) |
+| Stability | ~45% | 60–120 | [gaps.md G4](docs/gaps.md#g4-launch-crashes-and-cross-platform-pr-ci) |
 | Platforms (macOS, Windows, Linux, FreeBSD, web) | ~60% | 50–90 | [gaps.md G9](docs/gaps.md#g9-windows-and-linux-at-run-time) |
 | Plugins and ecosystem | ~5% | 200–400 | [gaps.md G11](docs/gaps.md#g11-no-plugin-hosting) |
 | AI features | ~25% | 150–300 | [gaps.md G12](docs/gaps.md#g12-ai-features) |
@@ -96,7 +419,7 @@ Also shipped: Ukrainian (menus only, 10%). Detail: [docs/localization-parity.md]
 
 Ranked; detail and "done when" in [docs/roadmap.md](docs/roadmap.md) and [docs/gaps.md](docs/gaps.md).
 
-1. **No launch crashes, and CI on pull requests** (macOS 12, Intel UHD, Windows 11 reports; no workflow runs the tests today). 40–80 h.
+1. **No launch crashes, and verified CI on pull requests** (macOS 12, Intel UHD, Windows 11 reports; the three-platform gate needs live runner results). 40–80 h.
 2. **Open Premiere's `.prproj`**, the beta blocker. 60–120 h.
 3. **10-bit / 4:2:2 camera media without hardware** (H.264 High 10 / 4:2:2, HEVC 4:2:2; #626). 30–50 h.
 4. **Measure fidelity against Premiere** and add `cargo xtask parity`. 50–90 h.

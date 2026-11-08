@@ -2,6 +2,8 @@ use super::*;
 
 /// Audio output provided by the platform layer (cpal on desktop, WebAudio on web).
 pub trait AudioOut {
+    /// Pump cached host state without device calls or waiting on a worker. Called even when idle.
+    fn poll(&mut self) {}
     /// Start output; `fill(buffer, channels)` is called on the audio thread with interleaved f32.
     fn start(&mut self, fill: Box<dyn FnMut(&mut [f32], usize) + Send>) -> Result<u32, String>;
     fn stop(&mut self);
@@ -46,6 +48,11 @@ pub struct AudioDevices {
 /// Host hooks for native file dialogs etc.
 #[derive(Default)]
 pub struct HostHooks {
+    /// Native hosts supply a supervised PDF service; no file/device work runs on the UI thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub pdf_references: Option<Box<dyn Fn() -> Result<crate::pdf_reference::service::Service, String>>>,
+    /// Optional session-only local Codex connection probe.
+    pub codex_connection: Option<Box<dyn crate::console::CodexConnection>>,
     pub pick_files: Option<Box<dyn FnMut(&[&str]) -> Vec<String>>>,
     /// The cursor in physical screen pixels. Where the windowing layer reports no pointer while files are dragged in from the OS (Windows), a drop is placed where this says it landed.
     pub cursor_screen_position: Option<Box<dyn Fn() -> Option<(i32, i32)>>>,

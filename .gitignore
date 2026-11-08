@@ -1,7 +1,10 @@
 *~
 plan/
 /target
+/target-console/
 /dist
+# Locally generated documents and exports can contain private, non-release material.
+/output/
 /log
 .DS_Store
 .claude/worktrees/

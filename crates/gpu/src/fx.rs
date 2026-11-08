@@ -52,6 +52,7 @@ const OP_MIRROR: u32 = 28;
 const OP_OFFSET: u32 = 29;
 const OP_VIDEO_LIMITER: u32 = 30;
 const OP_LUMETRI: u32 = 31;
+const OP_NOISE: u32 = 32;
 
 type Target = (wgpu::Texture, wgpu::TextureView);
 
@@ -116,6 +117,9 @@ fn boxes(radii: &[u32], vertical: bool, repeat: bool, out: &mut Vec<Step>) {
 fn steps(op: &FxOp) -> Vec<Step> {
     let mut out = Vec::new();
     match op {
+        FxOp::Noise { amount, grain, colored, clip, seed } => {
+            out.push(step(OP_NOISE, [*seed as u32, (*seed >> 32) as u32, *colored as u32, *clip as u32], &[*amount, *grain]))
+        }
         FxOp::BrightnessContrast { br, co } => out.push(step(OP_BRIGHTNESS_CONTRAST, [0; 4], &[*br, *co])),
         FxOp::ProcAmp { br, co, hue, sat } => out.push(step(OP_PROC_AMP, [0; 4], &[*br, *co, *hue, *sat])),
         FxOp::Tint { black, white, amount } => {

@@ -10,12 +10,24 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
+mod audio_place_plan;
+mod audio_track_mute_plan;
+mod audio_video_align_plan;
 pub mod bridge;
+mod clip_delete_plan;
+mod clip_move_plan;
+mod color_preset_plan;
+mod effect_param_plan;
 pub mod long_job;
+mod nest_clip_plan;
+mod performance_match_plan;
+mod request_plan;
 pub mod server;
+mod transition_add_plan;
+mod video_effect_plan;
 
 pub use bridge::BridgeClient;
-pub use server::FilmcraftMcp;
+pub use server::{FilmcraftConsoleMcp, FilmcraftControllerMcp, FilmcraftMarkerControllerMcp, FilmcraftMcp};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AutomationError {

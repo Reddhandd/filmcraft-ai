@@ -639,7 +639,7 @@ fn offline_media_json(s: &Session, job: u64) -> Value {
 fn item_json(s: &Session, it: &QueueItem) -> Value {
     let job = it.job.and_then(|id| s.jobs.iter().find(|j| j.id == id));
     let (progress, status_text) = match job {
-        Some(j) => (j.progress.fraction() as f64, j.progress.status.lock().unwrap_or_else(|e| e.into_inner()).clone()),
+        Some(j) => (j.progress.fraction() as f64, j.progress.status_text()),
         None => (if it.status == QueueStatus::Done { 1.0 } else { 0.0 }, String::new()),
     };
     json!({
@@ -652,6 +652,7 @@ fn item_json(s: &Session, it: &QueueItem) -> Value {
         "range": it.settings.range,
         "status": it.status,
         "progress": progress,
+        "phase": job.map(|j| j.progress.phase()),
         "etaSeconds": job.filter(|_| it.status == QueueStatus::Encoding).and_then(|j| j.progress.eta()).map(|d| d.as_secs_f64()),
         "statusText": status_text,
         "job": it.job,

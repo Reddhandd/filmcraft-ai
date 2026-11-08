@@ -184,6 +184,7 @@ impl SurfaceGeometry {
 pub(crate) struct DocumentId {
     sequence: Option<u64>,
     revision: u64,
+    epoch: u64,
 }
 
 /// Viewport geometry plus the immutable document and widget-focus identity a capture is bound to.
@@ -216,6 +217,11 @@ pub enum CropTarget {
 }
 
 impl CropTarget {
+    pub(crate) fn is_timeline(&self) -> bool {
+        let Self::Element(id) = self;
+        id == &format!("panel.{}", crate::dock::PanelKind::Timeline.id())
+    }
+
     /// Resolve the named element against the accepted pass's automation registry. Only an element
     /// drawn in the current pass with a finite, non-empty rectangle is accepted; a stale
     /// previous-pass rectangle or an unknown id is an error, never a fallback to the whole window.
@@ -235,6 +241,10 @@ impl CropTarget {
 struct Shot {
     token: u64,
     path: Option<String>,
+    inline_max_side: Option<u32>,
+    timeline_range: Option<[i64; 2]>,
+    timeline_context: Option<Value>,
+    timeline_view: Option<Value>,
     crop_target: Option<CropTarget>,
     /// The crop resolved from the accepted pass that was captured (set at issue time).
     crop: Option<[f32; 4]>,
@@ -306,7 +316,7 @@ fn reject(reply: Sender<Value>, token: u64, message: impl std::fmt::Display) {
 /// The active sequence id (none when no sequence is open) and project revision that a capture
 /// is bound to.
 fn active_document(app: &FilmcraftApp) -> DocumentId {
-    DocumentId { sequence: app.session.state.active_sequence.map(|id| id.0), revision: app.session.revision }
+    DocumentId { sequence: app.session.state.active_sequence.map(|id| id.0), revision: app.session.revision, epoch: app.session.document_epoch }
 }
 
 /// The widget currently holding keyboard focus, part of the capture identity.
@@ -348,6 +358,36 @@ fn refresh_identity(app: &mut FilmcraftApp, ctx: &egui::Context) {
 /// completed-but-undrained requests and reserves the raw image plus its encode/encode-reply buffers
 /// before capture.
 pub(crate) fn admit(app: &mut FilmcraftApp, ctx: &egui::Context, path: Option<String>, crop: Option<CropTarget>, reply: Sender<Value>) {
+    admit_output(app, ctx, path, crop, reply, None);
+}
+#[cfg(test)]
+pub(crate) fn admit_inline(app: &mut FilmcraftApp, ctx: &egui::Context, crop: Option<CropTarget>, max_side: u32, reply: Sender<Value>) {
+    admit_inline_range(app, ctx, crop, max_side, None, reply);
+}
+pub(crate) fn admit_inline_range(
+    app: &mut FilmcraftApp,
+    ctx: &egui::Context,
+    crop: Option<CropTarget>,
+    max_side: u32,
+    range: Option<[i64; 2]>,
+    reply: Sender<Value>,
+) {
+    let old_len = app.shots.requests.len();
+    admit_output(app, ctx, None, crop, reply, Some(max_side));
+    if app.shots.requests.len() > old_len
+        && let Some(shot) = app.shots.requests.last_mut()
+    {
+        shot.timeline_range = range;
+    }
+}
+fn admit_output(
+    app: &mut FilmcraftApp,
+    ctx: &egui::Context,
+    path: Option<String>,
+    crop: Option<CropTarget>,
+    reply: Sender<Value>,
+    inline_max_side: Option<u32>,
+) {
     refresh_identity(app, ctx);
     let token = next_token(&mut app.shots);
     let Some(geometry) = app.capture_geometry else {
@@ -398,6 +438,10 @@ pub(crate) fn admit(app: &mut FilmcraftApp, ctx: &egui::Context, path: Option<St
     app.shots.requests.push(Shot {
         token,
         path,
+        inline_max_side,
+        timeline_range: None,
+        timeline_context: None,
+        timeline_view: None,
         crop_target: crop,
         crop: None,
         crop_misses: 0,
@@ -418,12 +462,96 @@ pub(crate) fn admit(app: &mut FilmcraftApp, ctx: &egui::Context, path: Option<St
     ctx.request_repaint();
 }
 
+/// View identity excludes the playhead: playback alone must not invalidate a waveform capture.
+fn timeline_view(app: &FilmcraftApp) -> Option<Value> {
+    let layout = app.tl.layout.as_ref()?;
+    let ui = &app.ui.timeline;
+    Some(json!({"pps":layout.pps,"scroll":layout.scroll,
+        "content":[layout.content.min.x,layout.content.min.y,layout.content.max.x,layout.content.max.y],
+        "splitY":layout.split_y,"videoScroll":ui.v_scroll,"audioScroll":ui.a_scroll,
+        "videoHeight":ui.video_track_h,"audioHeight":ui.audio_track_h,
+        "headerWidth":ui.header_w,"waveforms":ui.show_waveforms}))
+}
+
+/// Crop only within the visible view. Never pan or zoom a user's timeline implicitly.
+fn focused_timeline_crop(layout: &crate::panels::timeline::Layout, crop: [f32; 4], range: [i64; 2]) -> Result<[f32; 4], String> {
+    let [start, end] = range;
+    if start < 0
+        || start >= end
+        || !layout.pps.is_finite()
+        || layout.pps <= 0.0
+        || !layout.scroll.is_finite()
+        || !layout.content.is_finite()
+        || !layout.content.is_positive()
+    {
+        return Err("invalid timeline range or view geometry".into());
+    }
+    let left = layout.tick_at(layout.content.min.x).0;
+    let right = layout.tick_at(layout.content.max.x).0;
+    if start < left || end > right {
+        return Err("requested range is outside the visible Timeline; pan/zoom to that range and retry".into());
+    }
+    let x0 = layout.x_of(filmcraft_time::Tick(start));
+    let x1 = layout.x_of(filmcraft_time::Tick(end));
+    if !x0.is_finite() || !x1.is_finite() || x1 - x0 < 1.0 {
+        return Err("requested range is narrower than one screen point; zoom in and retry".into());
+    }
+    let x0 = x0.max(crop[0]);
+    let x1 = x1.min(crop[0] + crop[2]);
+    if x1 <= x0 {
+        return Err("requested range is not visible in the captured panel".into());
+    }
+    Ok([x0, crop[1], x1 - x0, crop[3]])
+}
+
+/// Bounded context from the same accepted layout as the pixels, never a full project dump.
+fn timeline_context(app: &FilmcraftApp, crop: [f32; 4]) -> Result<Value, String> {
+    let layout = app.tl.layout.as_ref().ok_or("timeline layout is unavailable; show the Timeline and retry")?;
+    if !layout.pps.is_finite() || layout.pps <= 0.0 || !layout.scroll.is_finite() || !layout.content.is_finite() || !layout.content.is_positive() {
+        return Err("timeline has invalid geometry; reset its view and retry".into());
+    }
+    let rect = egui::Rect::from_min_size(egui::pos2(crop[0], crop[1]), egui::vec2(crop[2], crop[3]));
+    let body = layout.content.intersect(rect);
+    if !body.is_positive() {
+        return Err("the captured Timeline contains no visible time range".into());
+    }
+    let tracks: Vec<_> = layout
+        .rows
+        .iter()
+        .take(512)
+        .filter(|row| row.rect.intersects(body))
+        .take(33)
+        .map(|row| json!({"id":row.track,"kind":row.kind,"index":row.index}))
+        .collect();
+    let clips: Vec<_> = app
+        .auto
+        .all()
+        .iter()
+        .take(8192)
+        .filter_map(|element| {
+            let id = element.id.strip_prefix("timeline.clip.")?.parse::<u64>().ok()?;
+            let [x, y, w, h] = element.rect;
+            let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
+            (rect.is_finite() && rect.is_positive() && rect.intersects(body)).then_some(id)
+        })
+        .take(65)
+        .collect();
+    Ok(json!({"visibleRangeTicks":[layout.tick_at(layout.content.min.x).0,layout.tick_at(layout.content.max.x).0],
+        "capturedRangeTicks":[layout.tick_at(body.min.x).0,layout.tick_at(body.max.x).0],
+        "pointsPerSecond":layout.pps,"waveformsEnabled":app.ui.timeline.show_waveforms,
+        "tracks":tracks.iter().take(32).collect::<Vec<_>>(),"tracksTruncated":tracks.len()>32 || layout.rows.len()>512,
+        "clipIds":clips.iter().take(64).collect::<Vec<_>>(),"clipsTruncated":clips.len()>64 || app.auto.all().len()>8192,
+        "coverage":"visible audio/video rows only; pixel timing is approximate; not audio listening"}))
+}
+
 /// Why the request's bound document/revision or keyboard focus no longer matches. `None`
 /// means identity is unchanged; a mismatch must reject rather than save pixels from another
 /// document or focus.
 fn identity_reason(app: &FilmcraftApp, ctx: &egui::Context, shot: &Shot) -> Option<&'static str> {
     if active_document(app) != shot.document {
         Some("the document or project revision changed while the capture was queued")
+    } else if shot.timeline_view.as_ref().is_some_and(|view| timeline_view(app).as_ref() != Some(view)) {
+        Some("the timeline view changed while the capture was in flight; retry against the current view")
     } else if current_focus(ctx) != shot.focus {
         Some("the keyboard focus changed while the capture was queued")
     } else {
@@ -513,7 +641,7 @@ fn try_issue_shot(app: &mut FilmcraftApp, ctx: &egui::Context, index: usize) -> 
         Some(target) => target.resolve(&app.auto).map(Some),
         None => Ok(None),
     };
-    let resolved_crop = match crop_result {
+    let mut resolved_crop = match crop_result {
         Ok(crop) => crop,
         Err(message) => {
             let shot = &mut app.shots.requests[index];
@@ -526,7 +654,37 @@ fn try_issue_shot(app: &mut FilmcraftApp, ctx: &egui::Context, index: usize) -> 
             return IssueOutcome::Failed(message);
         }
     };
+    let is_timeline = shot.inline_max_side.is_some() && shot.crop_target.as_ref().is_some_and(CropTarget::is_timeline);
+    if let Some(range) = shot.timeline_range {
+        if !is_timeline {
+            return IssueOutcome::Failed("a focused range requires a Timeline capture".into());
+        }
+        let Some(layout) = app.tl.layout.as_ref() else {
+            return IssueOutcome::Failed("show the Timeline and retry".into());
+        };
+        let Some(crop) = resolved_crop else {
+            return IssueOutcome::Failed("timeline capture has no crop".into());
+        };
+        match focused_timeline_crop(layout, crop, range) {
+            Ok(crop) => resolved_crop = Some(crop),
+            Err(error) => return IssueOutcome::Failed(error),
+        }
+    }
+    let context = if is_timeline {
+        let Some(crop) = resolved_crop else {
+            return IssueOutcome::Failed("timeline capture has no crop".into());
+        };
+        match timeline_context(app, crop) {
+            Ok(context) => Some(context),
+            Err(error) => return IssueOutcome::Failed(error),
+        }
+    } else {
+        None
+    };
+    let view = if is_timeline { timeline_view(app) } else { None };
     let shot = &mut app.shots.requests[index];
+    shot.timeline_context = context;
+    shot.timeline_view = view;
     let Some(callback) = shot.callback.take() else {
         return IssueOutcome::Failed("screenshot failed: the capture callback was already consumed".into());
     };
@@ -654,7 +812,23 @@ fn image_reply(shot: &Shot, image: &ColorImage) -> Value {
         );
     }
     let captured_ppp = shot.geometry.surface.captured_pixels_per_point();
-    let mut reply = crate::control::save_screenshot_with_ppp(image, shot.path.as_deref(), shot.crop, captured_ppp);
+    let mut reply = match shot.inline_max_side {
+        Some(max_side) => crate::control::inline_screenshot_with_ppp(image, shot.crop, captured_ppp, max_side),
+        None => crate::control::save_screenshot_with_ppp(image, shot.path.as_deref(), shot.crop, captured_ppp),
+    };
+    if let Some(result) = reply.get_mut("result").and_then(Value::as_object_mut) {
+        if let Some(context) = &shot.timeline_context {
+            let mut context = context.clone();
+            if let Some(object) = context.as_object_mut() {
+                object.insert("requestedRangeTicks".into(), json!(shot.timeline_range));
+                object.insert("capturedPixelsPerPoint".into(), json!(captured_ppp));
+            }
+            result.insert("timeline".into(), context);
+        }
+        result.insert("revision".into(), json!(shot.document.revision));
+        result.insert("documentEpoch".into(), json!(shot.document.epoch));
+        result.insert("activeSequence".into(), json!(shot.document.sequence));
+    }
     if let Some(object) = reply.as_object_mut() {
         object.insert("request".into(), json!(shot.token));
     }

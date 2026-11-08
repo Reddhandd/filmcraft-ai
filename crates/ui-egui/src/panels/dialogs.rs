@@ -18,6 +18,9 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     crate::panels::workspaces::dialogs(app, ctx);
     crate::panels::voiceover::show(app, ctx);
     crate::panels::remix::show(app, ctx);
+    crate::flight_recorder::show(app, ctx);
+    crate::panels::performance_match::show(app, ctx);
+    crate::panels::music_analysis::show(app, ctx);
     crate::links::show_failed(app, ctx);
     crate::panels::interchange_export::show(app, ctx);
     crate::panels::frame_export::show(app, ctx);
@@ -456,12 +459,18 @@ fn about_tab(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     let t = app.tokens;
     ui.set_width(380.0);
     // ArtCraft wordmark (first-party trademark, docs/brand/).
-    let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
-    crate::brand::paint_wordmark(ui, egui::pos2(r.min.x, r.center().y), 20.0, app.ui.dark);
-    ui.add_space(6.0);
-    ui.heading("FilmCraft");
+    if !cfg!(feature = "independent-alpha") {
+        let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+        crate::brand::paint_wordmark(ui, egui::pos2(r.min.x, r.center().y), 20.0, app.ui.dark);
+        ui.add_space(6.0);
+    }
+    ui.heading(crate::brand::APP_NAME);
     ui.label(tlf!("Version {version}", version = env!("CARGO_PKG_VERSION")));
-    ui.label(tl!("A clean-room, pure-Rust non-linear video editor. Part of the ArtCraft family."));
+    if cfg!(feature = "independent-alpha") {
+        ui.label("Independent alpha based on FilmCraft by the ArtCraft team. Not an official ArtCraft release.");
+    } else {
+        ui.label(tl!("A clean-room, pure-Rust non-linear video editor. Part of the ArtCraft family."));
+    }
     ui.add_space(10.0);
     let mut link = |ui: &mut egui::Ui, id: &str, icon: Icon, label: &str, url: &str, primary: bool| {
         let size = egui::vec2(ui.available_width(), if primary { 36.0 } else { 28.0 });
@@ -490,12 +499,27 @@ fn about_tab(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
             links::open(app, ui.ctx(), url);
         }
     };
-    link(ui, "discord", Icon::Chat, tl!("Join the ArtCraft Discord"), links::DISCORD, true);
+    let community = if cfg!(feature = "independent-alpha") { "Upstream FilmCraft community" } else { tl!("Join the ArtCraft Discord") };
+    link(ui, "discord", Icon::Chat, community, links::DISCORD, true);
     ui.add_space(6.0);
     link(ui, "website", Icon::Globe, "getartcraft.com", links::WEBSITE, false);
     link(ui, "appPage", Icon::Globe, tl!("FilmCraft on getartcraft.com"), links::APP_PAGE, false);
-    link(ui, "github", Icon::Code, tl!("Source code on GitHub"), links::GITHUB, false);
-    link(ui, "reportIssue", Icon::Code, tl!("Report an issue"), links::ISSUES, false);
+    link(
+        ui,
+        "github",
+        Icon::Code,
+        if cfg!(feature = "independent-alpha") { "Upstream source on GitHub" } else { tl!("Source code on GitHub") },
+        links::GITHUB,
+        false,
+    );
+    link(
+        ui,
+        "reportIssue",
+        Icon::Code,
+        if cfg!(feature = "independent-alpha") { "Upstream issue tracker" } else { tl!("Report an issue") },
+        links::ISSUES,
+        false,
+    );
     ui.add_space(10.0);
     ui.label(egui::RichText::new(tl!("MIT OR Apache-2.0. Fonts: Inter, Noto Serif and JetBrains Mono (SIL OFL 1.1).")).small().color(t.text_dim));
 }

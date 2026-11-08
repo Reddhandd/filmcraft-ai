@@ -7,7 +7,8 @@
 //! Without a project, `--demo` or `--empty`, Settings ▸ General ▸ At Startup decides: Show Home
 //! (the demo project), Open Most Recent, or an empty project.
 //!
-//! `--control <port>` (or `FILMCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control server;
+//! Ordinary desktop starts create a private authenticated loopback bridge for the Console.
+//! `--control <port>` (or `FILMCRAFT_CONTROL_PORT`) instead selects the developer control server;
 //! `FILMCRAFT_CONTROL_TOKEN` is required (see `docs/control-protocol.md`).
 //! see `filmcraft_ui_egui::control` for the methods. A port that is not a number is an error from
 //! either source.
@@ -23,12 +24,16 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
+mod ai_provider;
 mod app_nap;
 mod appearance;
 mod args;
 mod audio;
 mod audio_in;
+mod audio_worker;
+mod codex_console;
 mod control_server;
+mod desktop_provider;
 #[cfg(target_os = "linux")]
 mod dev_icon;
 mod file_filters;
@@ -78,6 +83,14 @@ fn tell(text: &str, error: bool) {
 }
 
 fn main() -> eframe::Result {
+    // A PDF child has no window, project, recovery state or filesystem-path interface.
+    if std::env::args_os().skip(1).eq([std::ffi::OsString::from("--reference-pdf-worker")]) {
+        let result = filmcraft_ui_egui::pdf_reference::serve_stdio();
+        if let Err(error) = &result {
+            eprintln!("PDF helper I/O failed: {error}");
+        }
+        std::process::exit(i32::from(result.is_err()));
+    }
     // Windows: the update helper is a copy of this program started with `--finish-update`.
     #[cfg(windows)]
     if let Some(result) = craft_update::self_update::finish(&craft_update::suite::FILMCRAFT, &std::env::args_os().skip(1).collect::<Vec<_>>()) {
@@ -141,7 +154,7 @@ fn main() -> eframe::Result {
         // Before eframe creates the wgpu instance (e.g. no OpenGL on Windows, see graphics.rs).
         graphics::apply(&mut options, graphics.mode(), backend_override);
         let app_created = Arc::new(AtomicBool::new(false));
-        let result = eframe::run_native("FilmCraft", options, app_creator(launch.clone(), graphics.clone(), Arc::clone(&app_created)));
+        let result = eframe::run_native(filmcraft_ui_egui::brand::APP_NAME, options, app_creator(launch.clone(), graphics.clone(), Arc::clone(&app_created)));
         let app_created = app_created.load(Ordering::Relaxed);
         match &result {
             // wgpu reported the failure (no adapter, device creation failed) before the app
@@ -254,7 +267,12 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
             }
         }
         let mut app = FilmcraftApp::new(session);
-        app.set_startup_update_check(true);
+        // User-level conversation policy survives demo --data-dir and build changes.
+        app.ui
+            .console
+            .session_lock
+            .use_storage(args::session_lock_path(std::env::var_os("FILMCRAFT_SESSION_LOCK_FILE"), filmcraft_engine::autosave::user_data_dir()));
+        app.set_startup_update_check(!cfg!(feature = "ai-alpha"));
         app.graphics_notice = notice;
         if recover == Some(false) {
             app.dialog = None;
@@ -267,7 +285,12 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         }
         // Keep device selection available even when the default device is unavailable.
         // Settings ▸ Audio Hardware is applied on the first frame (`apply_prefs`).
-        app.audio = Some(Box::new(audio::CpalOut::new()));
+        app.audio = Some(Box::new(audio_worker::Output::new(cc.egui_ctx.clone(), audio::CpalOut::new)));
+        let pdf_context = cc.egui_ctx.clone();
+        app.hooks.pdf_references = Some(Box::new(move || {
+            let context = pdf_context.clone();
+            filmcraft_ui_egui::pdf_reference::service::Service::new(Arc::new(move || context.request_repaint()))
+        }));
         app.hooks.pick_files = Some(Box::new(|exts: &[&str]| {
             rfd::FileDialog::new()
                 .add_filter(filmcraft_ui_egui::i18n::t("Media"), &file_filters::extensions(exts))
@@ -305,6 +328,11 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         app.hooks.pick_folder = Some(Box::new(|| rfd::FileDialog::new().pick_folder().map(|p| p.to_string_lossy().to_string())));
         app.hooks.pick_folder_at =
             Some(Box::new(|dir: &str| rfd::FileDialog::new().set_directory(dir).pick_folder().map(|p| p.to_string_lossy().into_owned())));
+        // macOS: a synchronous native panel spins a nested event loop. If winit receives an
+        // event while handling the menu click, it panics and closes the app. The async panel
+        // runs as a sheet and answers on a later frame instead.
+        #[cfg(target_os = "macos")]
+        install_macos_dialog_runner(&mut app);
         // Linux: the XDG portal call blocks until the user chooses, which would stop the frame
         // loop (GNOME offers to force-quit the window after about five seconds, #260). Show the
         // dialog on its own thread instead; the app keeps running and acts on the answer.
@@ -346,9 +374,42 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
             app.hooks.menu_changed = Some(update);
             app.ui.show_menu_bar = false;
         }
+        // Finder launches have no developer launcher/environment. Bind the private listener
+        // once, then inject its credential only into the adapters that own AI child processes.
+        // An explicitly requested development listener retains its existing token semantics.
+        let (provider_port, control_token, private_rx) = if control_port.is_none() {
+            match control_server::start_private(cc.egui_ctx.clone()) {
+                Ok((port, token, rx)) => (Some(port), Some(token), Some(rx)),
+                Err(error) => {
+                    log::error!("{error}");
+                    app.ui.console.connection = filmcraft_ui_egui::console::ConnectionStatus::Failed(error);
+                    (None, None, None)
+                }
+            }
+        } else {
+            (control_port, None, None)
+        };
+        let mut connections = filmcraft_ui_egui::console::connection_manager::Manager::new(Box::new(
+            codex_console::Connection::new(provider_port, cc.egui_ctx.clone()).with_control_token(control_token.clone()),
+        ))
+        .with_desktop(Box::new(
+            desktop_provider::Connection::new(provider_port)
+                .with_control_token(control_token.clone())
+                .with_storage(data_dir.clone().or_else(default_data_dir).map(|root| root.join("Console").join("Desktop"))),
+        ));
+        if filmcraft_ui_egui::console::provider::API_CONNECTIONS_ENABLED {
+            connections = connections.with_api(Box::new(
+                ai_provider::Connection::new(provider_port, cc.egui_ctx.clone())
+                    .with_control_token(control_token)
+                    .with_storage(data_dir.clone().or_else(default_data_dir).map(|root| root.join("Console").join("ApiSessions"))),
+            ));
+        }
+        app.hooks.codex_connection = Some(Box::new(connections));
         if let Some(port) = control_port {
             let rx = control_server::start(port, cc.egui_ctx.clone());
             app = if control_input_only { app.with_control_input_only(rx) } else { app.with_control(rx) };
+        } else if let Some(rx) = private_rx {
+            app = app.with_control(rx);
         }
         Ok(Box::new(app))
     })
@@ -456,6 +517,79 @@ fn agent_event_loop(agent: bool) -> Option<eframe::EventLoopBuilderHook> {
     None
 }
 
+/// Start a macOS sheet without entering Cocoa's synchronous modal event loop. The rfd future
+/// creates the sheet on the UI thread; a worker waits for its completion so the UI can keep
+/// handling events. A panicked dialog drops the sender and is treated as cancelled by the UI.
+#[cfg(target_os = "macos")]
+fn install_macos_dialog_runner(app: &mut FilmcraftApp) {
+    app.hooks.run_dialog = Some(Box::new(run_dialog_macos));
+}
+
+#[cfg(target_os = "macos")]
+fn run_dialog_macos(dialog: filmcraft_ui_egui::native_dialogs::FileDialog) -> std::sync::mpsc::Receiver<Vec<String>> {
+    use filmcraft_ui_egui::native_dialogs::FileDialog;
+
+    let media = filmcraft_ui_egui::i18n::t("Media").to_string();
+    let project = filmcraft_ui_egui::i18n::t("FilmCraft Project").to_string();
+    let project_exts = project_patterns();
+    let dialog = prepare_dialog(dialog);
+    let path = |p: rfd::FileHandle| p.path().to_string_lossy().into_owned();
+    let future: std::pin::Pin<Box<dyn std::future::Future<Output = Vec<String>> + Send>> = match dialog {
+        FileDialog::OpenFiles { exts } => {
+            let pick = rfd::AsyncFileDialog::new().add_filter(media, &exts).pick_files();
+            Box::pin(async move { pick.await.unwrap_or_default().into_iter().map(path).collect() })
+        }
+        FileDialog::OpenFile { filter, exts } => {
+            let pick = rfd::AsyncFileDialog::new().add_filter(filter, &exts).pick_file();
+            Box::pin(async move { pick.await.map(path).into_iter().collect() })
+        }
+        FileDialog::Relink { exts, .. } => {
+            let pick = rfd::AsyncFileDialog::new().add_filter(media, &exts).pick_file();
+            Box::pin(async move { pick.await.map(path).into_iter().collect() })
+        }
+        FileDialog::OpenProject => {
+            let pick = rfd::AsyncFileDialog::new().add_filter(project, &project_exts).pick_file();
+            Box::pin(async move { pick.await.map(path).into_iter().collect() })
+        }
+        FileDialog::SaveProject { name } => {
+            let pick = rfd::AsyncFileDialog::new().add_filter(project, &project_exts).set_file_name(name).save_file();
+            Box::pin(async move { pick.await.map(path).into_iter().collect() })
+        }
+        FileDialog::SaveAs { filter, exts, name } => {
+            let file = std::path::Path::new(&name);
+            let mut builder =
+                rfd::AsyncFileDialog::new().add_filter(filter, &exts).set_file_name(file.file_name().map_or(name.as_str().into(), |n| n.to_string_lossy()));
+            if let Some(dir) = file.parent().filter(|d| d.is_dir()) {
+                builder = builder.set_directory(dir);
+            }
+            let pick = builder.save_file();
+            Box::pin(async move { pick.await.map(path).into_iter().collect() })
+        }
+        FileDialog::Folder { at } => {
+            let builder = rfd::AsyncFileDialog::new();
+            let builder = match at {
+                Some(dir) if !dir.is_empty() => builder.set_directory(dir),
+                _ => builder,
+            };
+            let pick = builder.pick_folder();
+            Box::pin(async move { pick.await.map(path).into_iter().collect() })
+        }
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new().name("file-dialog".into()).spawn(move || {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pollster::block_on(future))) {
+            Ok(paths) => {
+                let _ = tx.send(paths);
+            }
+            Err(_) => log::warn!("the file dialog thread panicked; taken as cancelled"),
+        }
+    });
+    if let Err(e) = spawned {
+        log::warn!("could not start the file dialog thread: {e}");
+    }
+    rx
+}
+
 /// Show `dialog` with rfd on a worker thread and answer on the returned channel (#260). Filter
 /// names are translated here, on the UI thread (the interface language is per thread). A dialog
 /// thread that can't start or panics drops the sender: the app takes that as cancelled.
@@ -507,10 +641,10 @@ fn run_dialog_off_thread(dialog: filmcraft_ui_egui::native_dialogs::FileDialog) 
     rx
 }
 
-/// A dialog as the Linux dialog thread shows it: filter names translated (here, on the UI thread:
-/// the interface language is per thread) and every extension list turned into the
-/// case-insensitive patterns the synchronous pickers use, so `CLIP.MP4` stays visible (#262).
-#[cfg(target_os = "linux")]
+/// Prepare an asynchronous dialog on the UI thread: translate its filter labels and normalize
+/// extension patterns. Linux needs patterns for mixed-case camera filenames (#262); macOS keeps
+/// the ordinary extensions.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn prepare_dialog(dialog: filmcraft_ui_egui::native_dialogs::FileDialog) -> filmcraft_ui_egui::native_dialogs::FileDialog {
     use filmcraft_ui_egui::native_dialogs::FileDialog;
     let t = |s: &str| filmcraft_ui_egui::i18n::t(s).to_string();
@@ -524,14 +658,25 @@ fn prepare_dialog(dialog: filmcraft_ui_egui::native_dialogs::FileDialog) -> film
     }
 }
 
-/// The project dialogs' filter patterns (`EDIT.FCPROJ` included).
-#[cfg(target_os = "linux")]
+/// The project dialogs' filter patterns (`EDIT.FCPROJ` included on Linux).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn project_patterns() -> Vec<String> {
     file_filters::extensions(&["fcproj"])
 }
 
 #[cfg(test)]
 mod tests {
+    /// A synchronous macOS picker enters a nested Cocoa event loop during winit's menu event.
+    /// Before the fix the desktop app had no runner and opening Save As could terminate it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_file_dialogs_use_the_async_runner() {
+        let mut app = filmcraft_ui_egui::FilmcraftApp::new(filmcraft_engine::Session::default());
+        assert!(app.hooks.run_dialog.is_none());
+        super::install_macos_dialog_runner(&mut app);
+        assert!(app.hooks.run_dialog.is_some());
+    }
+
     /// Start-up registers the hardware decoders whether or not anything is logged (no logger is
     /// installed here, as in a normal run).
     #[test]

@@ -1,4 +1,4 @@
-//! A selected transition (#430): its Effect Controls (Duration, Alignment, Reverse and its own
+//! A selected transition (#430): its Effect Controls (Type, Duration, Alignment, Reverse and its own
 //! settings, as Premiere's Change transition settings / Align transitions / Change transition
 //! duration pages describe them) and the Set Transition Duration dialog a double-click on it in
 //! the Timeline opens. Every change is one `sequence.setTransition`; dragging a value is one undo
@@ -19,7 +19,8 @@
 //! Not here yet: the A/B preview thumbnails with their Start / End sliders, Show Actual Sources,
 //! and a rolling edit by dragging clip A or B in the transition's timeline.
 //!
-//! Automation ids: `effectControls.transition.duration`, `.alignment` (+ `.alignment.option.<center|
+//! Automation ids: `effectControls.transition.type` (+ `.type.option.<id>` while open),
+//! `.duration`, `.alignment` (+ `.alignment.option.<center|
 //! start|end>` while open), `.reverse`, `.reset`, `.param.<id>` (a point's are `.param.<id>.x` /
 //! `.y`; a list's entries `.param.<id>.option.<n>` while open); its timeline's
 //! `effectControls.transition.timeline`, `.timeline.ruler`, `.timeline.a` / `.timeline.b` (the
@@ -32,7 +33,7 @@
 use egui::{Align2, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
 use filmcraft_edit::Edge;
 use filmcraft_edit::transitions::{self as trn, Alignment};
-use filmcraft_project::{ParamKind, ParamValue, Transition, TransitionId};
+use filmcraft_project::{EffectKind, ParamKind, ParamValue, TrackKind, Transition, TransitionId};
 use filmcraft_time::{FrameRate, Tick};
 use serde_json::{Value, json};
 
@@ -100,6 +101,10 @@ pub fn effect_controls(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, id
     let seq_name = app.session.state.active_sequence.and_then(|i| app.session.project.item(i)).map(|i| i.name.clone()).unwrap_or_default();
     let def = x.effect.def();
     let name = def.map_or(x.effect.effect.as_str(), |d| d.name).to_string();
+    let kind = seq
+        .all_tracks()
+        .find(|track| track.transitions.iter().any(|transition| transition.id == id))
+        .map_or(EffectKind::VideoTransition, |track| if track.kind == TrackKind::Video { EffectKind::VideoTransition } else { EffectKind::AudioTransition });
     let one_sided = x.from.is_none() || x.to.is_none();
     let mut changes: Vec<Value> = Vec::new();
     let mut elems: Elems = Vec::new();
@@ -123,6 +128,30 @@ pub fn effect_controls(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, id
     };
     egui::ScrollArea::vertical().id_salt(("tr-ec-scroll", id.0)).auto_shrink([false, false]).show(&mut child, |ui| {
         egui::Grid::new(("tr-ec-grid", id.0)).num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
+            ui.label(tl!("Type"));
+            let mut options = Vec::new();
+            let r = craft_ui::ComboBox::from_id_salt(("tr-type", id.0)).selected_text(crate::i18n::t(&name)).width(170.0).height(320.0).show_ui(ui, |ui| {
+                let mut group = String::new();
+                for candidate in filmcraft_project::effect_defs().iter().filter(|candidate| candidate.kind == kind && !candidate.category.contains(&"Obsolete"))
+                {
+                    let category = candidate.category.join(" / ");
+                    if category != group {
+                        ui.separator();
+                        ui.strong(&category);
+                        group = category;
+                    }
+                    let option = ui.selectable_label(x.effect.effect == candidate.id, crate::i18n::t(candidate.name));
+                    if option.clicked() && x.effect.effect != candidate.id {
+                        changes.push(json!({"effect": candidate.id}));
+                    }
+                    options.push((format!("effectControls.transition.type.option.{}", candidate.id), option.rect, candidate.name.to_string()));
+                }
+            });
+            elems.extend(options);
+            elems.push(("effectControls.transition.type".into(), r.response.rect, name.clone()));
+            ui.end_row();
+            row_line(ui);
+
             ui.label(tl!("Duration"));
             let mut frames = rate.frame_at(x.duration).max(1);
             let r = duration_field(ui, &mut frames, max_frames, rate, drop_frame);

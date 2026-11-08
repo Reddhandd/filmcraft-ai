@@ -1,5 +1,7 @@
 [workspace]
 resolver = "3"
+# Published third-party dependency, qualified separately from project crates.
+exclude = ["vendor/wgpu-hal"]
 members = ["crates/*", "apps/*", "xtask"]
 default-members = ["crates/*", "apps/*", "xtask"]
 
@@ -160,6 +162,8 @@ codegen-units = 1
 
 # Keep the complete egui family and native event bridge on reviewed fork commits.
 [patch.crates-io]
+# Bound macOS Metal drawable waits; provenance and licenses are retained with the patch.
+wgpu-hal = { path = "vendor/wgpu-hal" }
 ecolor = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
 emath = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
 epaint = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }

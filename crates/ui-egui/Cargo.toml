@@ -9,6 +9,10 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Distributed modified builds retain upstream credits but must not embed ArtCraft marks.
+independent-alpha = []
+
 [dependencies]
 craft-ui = { workspace = true }
 filmcraft-time = { workspace = true }
@@ -23,6 +27,8 @@ filmcraft-render = { workspace = true }
 filmcraft-text = { workspace = true }
 filmcraft-audio-dsp = { workspace = true }
 filmcraft-engine = { workspace = true }
+filmcraft-format = { workspace = true }
+chrono = { workspace = true, features = ["clock"] }
 filmcraft-export = { workspace = true }
 filmcraft-gpu = { workspace = true }
 filmcraft-scopes = { workspace = true }
@@ -30,17 +36,24 @@ egui = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "clipboard"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Stable content identities for recoverable memory compaction and reference snapshots.
+sha2 = "=0.11.1"
 log = { workspace = true }
 rayon = { workspace = true }
 web-time = "1"
 # Unicode Bidirectional Algorithm for Arabic and Hebrew captions in reading order (MIT OR Apache-2.0).
 unicode-bidi = "0.3.18"
 # ArtCraft wordmark (PNG) for the About dialog and Home screen.
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+# PDF reference text extraction (MIT); bounded load and decompression APIs.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.lopdf]
+version = "=0.45.0"
+default-features = false
 
 # Thread/process CPU clocks for frame-job profiling (safe wrappers; see frames.rs).
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", default-features = false, features = ["std", "time"] }
+rustix = { version = "1", default-features = false, features = ["std", "time", "fs"] }
 # the same clocks on Windows (GetThreadTimes / GetProcessTimes behind a safe API; MIT OR Apache-2.0)
 [target.'cfg(windows)'.dependencies]
 cpu-time = "1"
@@ -64,4 +77,18 @@ serde_json = { workspace = true }
 toml = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+getrandom = "0.4"
+# Bounded EPUB ZIP/XML import; pure-Rust deflate, no scripts or external resource loading.
+zip = { version = "=7.4.0", default-features = false, features = ["deflate"] }
+roxmltree = { workspace = true }
+redb = "=4.5.0"
+# Pure-Rust requested-page rendering; no bundled fallback fonts or external CMaps.
+hayro = { version = "=0.9.0", default-features = false }
+# Pure-Rust inference for separately downloaded, checksummed CC-BY-SA OCR weights.
+ocrs = { version = "=0.13.1", default-features = false, features = ["rten"] }
+rten = { version = "=0.26.0", default-features = false, features = ["onnx_format"] }
 craft-update = { workspace = true }
+# Public model downloads use the same pure-Rust TLS provider as local speech models.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
+rustls = { version = "0.23", default-features = false }
+rustls-rustcrypto = "0.0.2-alpha"

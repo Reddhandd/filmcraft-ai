@@ -12,16 +12,20 @@
 
 pub mod aaf_omf;
 pub mod autosave;
+mod bounded_io;
 pub mod captions;
 pub mod clip_ops;
 pub mod color;
 pub mod commands;
+pub mod console_contract;
+mod consolidate_active;
 pub mod demo;
 pub mod doc_path;
 pub mod essential_sound;
 pub mod export_tools;
 pub mod graphic_templates;
 pub mod graphics;
+pub mod inspection;
 pub mod interchange;
 pub mod keyboard;
 mod keyframe_move;
@@ -32,10 +36,13 @@ pub mod media_pool;
 pub mod media_watch;
 pub mod mixer;
 pub mod multicam;
+pub mod music_analysis;
 pub mod narration;
 pub mod panels;
 pub mod paste_media;
 pub mod perf;
+pub mod performance_match;
+pub mod persistent_history;
 pub mod presets;
 pub mod previews;
 pub mod project_manager;
@@ -54,6 +61,7 @@ pub mod shortcuts;
 pub mod source_monitor;
 pub mod sync;
 pub mod transcript;
+pub mod transition_clipboard;
 pub mod trim;
 pub mod voiceover;
 
@@ -101,6 +109,22 @@ pub type Result<T> = std::result::Result<T, EngineError>;
 /// Host services (file access, clipboard…) injected by the frontend.
 pub trait Services: Send + Sync {
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>>;
+    /// Read a bounded document. Streaming hosts should expose a reader or override this method;
+    /// the fallback supports hosts whose files are already held in memory.
+    fn read_file_bounded(&self, path: &str, limit: usize) -> std::io::Result<Vec<u8>> {
+        if let Some(reader) = self.reader(path) {
+            let reader = reader?;
+            let len = bounded_io::size(reader.len(), limit)?;
+            let mut bytes = Vec::new();
+            bytes.try_reserve_exact(len).map_err(|error| std::io::Error::other(format!("cannot allocate document buffer: {error}")))?;
+            bytes.resize(len, 0);
+            reader.read_at(0, &mut bytes)?;
+            return Ok(bytes);
+        }
+        let bytes = self.read_file(path)?;
+        bounded_io::size(bytes.len() as u64, limit)?;
+        Ok(bytes)
+    }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()>;
     /// Publish a complete new file only when the final path is unoccupied. Publication must
     /// reject a concurrent collision; a prior existence check alone is insufficient.
@@ -162,6 +186,9 @@ pub struct FsServices;
 impl Services for FsServices {
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
         std::fs::read(path)
+    }
+    fn read_file_bounded(&self, path: &str, limit: usize) -> std::io::Result<Vec<u8>> {
+        bounded_io::file(std::path::Path::new(path), limit)
     }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
         // Atomic + durable: temp file in the same directory, fsync, rename, fsync the directory.
@@ -334,6 +361,9 @@ pub struct EditorState {
     /// Timeline clipboard (serialized track items with their relative track index).
     #[serde(skip)]
     pub clipboard: Vec<(TrackKind, usize, filmcraft_project::TrackItem)>,
+    /// Copied transition with frame-based timing, independent of the clip clipboard.
+    #[serde(skip)]
+    pub clipboard_transition: Option<transition_clipboard::TransitionClipboard>,
     pub default_video_transition: String,
     pub default_audio_transition: String,
     /// Selected edit points (trim mode).
@@ -497,6 +527,8 @@ pub struct Session {
     pub browser: media_browser::BrowserState,
     /// Nesting depth of [`Session::execute`] (commands that run other commands).
     exec_depth: u32,
+    /// Nested edit groups publish only their final project and persistence state.
+    edit_group_depth: u32,
     /// Each media file's size and modification time when last seen (Settings ▸ Media ▸
     /// Automatically refresh growing files, [`media_watch`]).
     pub media_stamps: std::collections::HashMap<String, media_watch::Stamp>,
@@ -530,11 +562,12 @@ impl Job {
             "id": self.id,
             "label": self.label,
             "progress": self.progress.fraction(),
+            "phase": self.progress.phase(),
             // seconds left at the job's recent speed; null until it can tell
             "etaSeconds": self.progress.eta().map(|d| d.as_secs_f64()),
             "done": self.progress.done.load(Ordering::Relaxed),
             "total": self.progress.total.load(Ordering::Relaxed),
-            "status": self.progress.status.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            "status": self.progress.status_text(),
             "finished": res.is_some(),
             "result": match res { Some(Ok(r)) => serde_json::to_value(r).unwrap_or_default(), Some(Err(e)) => serde_json::json!({"error": e}), None => Value::Null },
         })
@@ -593,6 +626,7 @@ impl Session {
             log: Default::default(),
             browser: Default::default(),
             exec_depth: 0,
+            edit_group_depth: 0,
             media_stamps: Default::default(),
             media_scan: None,
         }
@@ -660,14 +694,30 @@ impl Session {
     /// Tell the worker about the current project state if it changed (cheap: an `Arc` clone and a
     /// channel send; serialization happens on the worker). Called after every command.
     pub fn sync_persistence(&mut self) {
-        let dirty = self.is_dirty();
+        if self.edit_group_depth != 0 {
+            return;
+        }
+        if self.persistence.is_none() {
+            return;
+        }
+        // View-only commands do not advance the edit revision, but recovery must
+        // still reopen the working sequence/playhead. Clean projects need no journal.
+        let view = self.is_dirty().then(|| self.project_view());
         let Some(p) = self.persistence.as_mut() else { return };
-        let cur = autosave::Sent { revision: self.revision, saved_revision: self.saved_revision, path: self.path.clone() };
+        let cur = autosave::Sent { revision: self.revision, saved_revision: self.saved_revision, path: self.path.clone(), view: view.clone() };
         if p.last_sent.as_ref() == Some(&cur) {
             return;
         }
-        if dirty {
-            p.send_dirty(self.project.clone(), self.revision, self.path.clone());
+        if let Some(view) = view {
+            if p.last_sent.as_ref().is_some_and(|previous| {
+                previous.view.is_some() && previous.revision == cur.revision && previous.saved_revision == cur.saved_revision && previous.path == cur.path
+            }) {
+                // Playback/playhead movement must not clone the full Undo/Redo stack per frame.
+                // The channel preserves ordering with project replacement and clean messages.
+                p.send_view(view);
+            } else {
+                p.send_dirty(self.project.clone(), self.revision, self.path.clone(), self.history.clone(), view);
+            }
         } else {
             p.send_clean();
         }
@@ -690,7 +740,7 @@ impl Session {
                 {
                     self.saved_revision = revision;
                 }
-                autosave::WorkerEvent::Error(m) => {
+                autosave::WorkerEvent::Error(m) | autosave::WorkerEvent::Stopped(m) => {
                     self.log.push(panels::Level::Error, "autosave", m.clone());
                     self.events.push(Event::Toast { message: m, error: true });
                 }
@@ -746,6 +796,7 @@ impl Session {
 
     /// Run a command by id.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
+        commands::validate_controller_context(self, id, &params)?;
         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
         if self.exec_depth == 0 && spec.journal && self.trim_play.active() {
             self.settle_trim_playback(id);
@@ -778,10 +829,12 @@ impl Session {
         }
         self.sync_persistence();
         // playback reads the newest snapshot (mixer moves, mutes… are heard while playing)
-        self.previews.live.publish_project(self.project.clone());
+        if self.edit_group_depth == 0 {
+            self.previews.live.publish_project(self.project.clone());
+        }
         if r.is_ok() && spec.journal {
             self.journal.push((id.to_string(), params));
-            if self.journal.len() > 10_000 {
+            if self.edit_group_depth == 0 && self.journal.len() > 10_000 {
                 self.journal.drain(..1000);
             }
         }
@@ -843,7 +896,7 @@ impl Session {
         filmcraft_project::ProjectView {
             open_sequences: self.state.open_sequences.iter().copied().filter(is_seq).collect(),
             active_sequence: self.state.active_sequence.filter(is_seq),
-            sequences: self.state.timeline_views.iter().filter(|(id, _)| is_seq(id)).map(|(id, v)| (*id, *v)).collect(),
+            sequences: self.state.timeline_views.iter().filter(|(id, _)| is_seq(id)).filter_map(|(id, v)| (*v).checked().map(|v| (*id, v))).collect(),
             playheads: self.state.playheads.iter().filter(|(id, _)| is_seq(id)).map(|(id, t)| (*id, *t)).collect(),
         }
     }
@@ -892,6 +945,7 @@ impl Session {
         let mut p = (*self.project).clone();
         let mut st = self.state.clone();
         let r = f(&mut p, &mut st)?;
+        p.check_identities().map_err(EngineError::Other)?;
         self.refuse_self_nesting(&p)?;
         let old = std::mem::replace(&mut self.project, Arc::new(p));
         self.history.undo.push((label.to_string(), old));
@@ -918,6 +972,7 @@ impl Session {
         let mut p = (*self.project).clone();
         let mut st = self.state.clone();
         let r = f(&mut p, &mut st)?;
+        p.check_identities().map_err(EngineError::Other)?;
         self.refuse_self_nesting(&p)?;
         self.project = Arc::new(p);
         self.state = st;
@@ -929,23 +984,29 @@ impl Session {
     /// Run several undoable edits as one undo step labelled `label`. If `f` fails, every edit it made
     /// is rolled back and the history is as before.
     pub fn edit_group<R>(&mut self, label: &str, f: impl FnOnce(&mut Session) -> Result<R>) -> Result<R> {
-        let (project, state, undo, redo, limit) =
-            (self.project.clone(), self.state.clone(), self.history.undo.len(), self.history.redo.clone(), self.history.limit);
+        let depth = self.edit_group_depth;
+        self.edit_group_depth = depth.checked_add(1).filter(|n| *n <= 64).ok_or_else(|| EngineError::Other("edit groups are nested too deeply".into()))?;
+        let (project, state, history) = (self.project.clone(), self.state.clone(), self.history.clone());
+        let (undo, limit) = (history.undo.len(), history.limit);
+        let (revision, saved_revision, events, journal) = (self.revision, self.saved_revision, self.events.len(), self.journal.len());
         // keep every step the group makes, however many, so the first one can be found afterwards
         self.history.limit = usize::MAX;
+        self.history.merge_key = None;
         // a panic inside the group must not leave the history unlimited: restore, then let it go on
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+        self.edit_group_depth = depth;
         self.history.limit = limit;
         let first = self.history.undo.get(undo).map(|e| e.1.clone());
         let rolled_back = |s: &mut Session| {
-            s.history.undo.truncate(undo);
-            s.history.redo = redo.clone();
-            s.history.merge_key = None;
+            s.history = history.clone();
             s.project = project.clone();
             s.state = state.clone();
-            s.bump();
+            s.revision = revision;
+            s.saved_revision = saved_revision;
+            s.events.truncate(events);
+            s.journal.truncate(journal);
         };
-        match (r, first) {
+        let result = match (r, first) {
             (Ok(Ok(v)), Some(first)) => {
                 self.history.undo.truncate(undo);
                 self.history.undo.push((label.to_string(), first));
@@ -964,7 +1025,15 @@ impl Session {
                 rolled_back(self);
                 std::panic::resume_unwind(panic)
             }
+        };
+        if depth == 0 {
+            if self.journal.len() > 10_000 {
+                self.journal.drain(..self.journal.len().saturating_sub(10_000));
+            }
+            self.previews.live.publish_project(self.project.clone());
+            self.sync_persistence();
         }
+        result
     }
 
     /// Where the undo history stands now, for [`Session::revert_to`].
@@ -1087,9 +1156,11 @@ impl Session {
         if let Some(seq) = self.state.active_sequence.and_then(|s| p.sequence(s)) {
             self.state.selection.retain(|c| seq.find_item(*c).is_some());
             self.state.caption_selection.retain(|c| seq.find_caption(*c).is_some());
+            self.state.transition_selection.retain(|id| seq.all_tracks().any(|track| track.transitions.iter().any(|transition| transition.id == *id)));
         } else {
             self.state.selection.clear();
             self.state.caption_selection.clear();
+            self.state.transition_selection.clear();
         }
         self.state.project_selection.retain(|i| p.item(*i).is_some());
         self.drop_stale_gap();
@@ -1286,6 +1357,8 @@ mod explicit_targets_tests;
 #[cfg(test)]
 mod export_tests;
 #[cfg(test)]
+mod file_limit_tests;
+#[cfg(test)]
 mod file_tests;
 #[cfg(test)]
 mod gap_selection_tests;
@@ -1331,6 +1404,8 @@ mod panels_tests;
 mod par_tests;
 #[cfg(test)]
 mod paste_media_tests;
+#[cfg(test)]
+mod performance_match_tests;
 #[cfg(test)]
 mod place_items_tests;
 #[cfg(test)]
@@ -1393,3 +1468,6 @@ mod source_placement_tests;
 mod frame_export_tests;
 #[cfg(test)]
 mod wasm_clock_tests;
+
+#[cfg(test)]
+mod controller_effect_tests;

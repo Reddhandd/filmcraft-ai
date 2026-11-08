@@ -554,3 +554,131 @@ fn hdr_input_gpu_matches_cpu() {
         assert!(apart > 20, "{name}: colour management changed nothing ({apart})");
     }
 }
+
+#[test]
+fn gpu_places_rendered_nested_pixels_with_masks_like_cpu_reference() {
+    use filmcraft_media::MediaSource;
+    use filmcraft_media::generators::GeneratorSource;
+    use filmcraft_project::{ItemKind, Label, Mask, MaskPath, MediaClip, MediaRef, ParamValue, Project, SequenceSettings, TrackKind};
+    use filmcraft_render::{RenderOptions, SourceMap};
+    use filmcraft_time::{FrameRate, Tick, TimeRange};
+    let Some((dev, queue)) = device() else {
+        eprintln!("no GPU adapter; skipping nested placement qualification");
+        return;
+    };
+    let mut compositor = GpuCompositor::new(&dev, &queue);
+    for scale in [0.5, 1.0] {
+        for masked in [false, true] {
+            for (motion_scale, rotation) in [(40.0, 13.0), (175.0, 13.0), (175.0, 0.0)] {
+                let mut project = Project::new("generated nested placement");
+                let generator = GeneratorSource::new(
+                    filmcraft_media::Generator::Demo(filmcraft_media::DemoScene::OceanSunset),
+                    80,
+                    60,
+                    FrameRate::FPS_24,
+                    FrameRate::FPS_24.tick_of(48),
+                );
+                let info = generator.info().clone();
+                let media = project.add_item(
+                    "generated media",
+                    Label::Iris,
+                    ItemKind::Media(MediaClip {
+                        media: MediaRef::Generator(generator.generator.clone()),
+                        info,
+                        interpret: Default::default(),
+                        mark_in: None,
+                        mark_out: None,
+                        markers: vec![],
+                        offline: false,
+                        proxy: None,
+                        identity: None,
+                    }),
+                    None,
+                );
+                let mut sources = SourceMap::default();
+                sources.0.insert(media, Arc::new(generator));
+                let inner = project.new_sequence("inner", SequenceSettings { width: 80, height: 60, ..Default::default() }, 1, 0, None);
+                let inner_clip = project
+                    .make_track_item(media, TrackKind::Video, Tick::ZERO, TimeRange::new(Tick::ZERO, FrameRate::FPS_24.tick_of(48)), FrameRate::FPS_24)
+                    .unwrap();
+                project.sequence_mut(inner).unwrap().video_tracks[0].items.push(inner_clip);
+                let outer = project.new_sequence("outer", SequenceSettings { width: 96, height: 72, ..Default::default() }, 1, 0, None);
+                let mut nest = project
+                    .make_track_item(inner, TrackKind::Video, Tick::ZERO, TimeRange::new(Tick::ZERO, FrameRate::FPS_24.tick_of(48)), FrameRate::FPS_24)
+                    .unwrap();
+                nest.effect_mut("motion").unwrap().params.get_mut("scale").unwrap().value = ParamValue::Float(motion_scale);
+                nest.effect_mut("motion").unwrap().params.get_mut("rotation").unwrap().value = ParamValue::Float(rotation);
+                nest.effect_mut("opacity").unwrap().params.get_mut("opacity").unwrap().value = ParamValue::Float(65.0);
+                if masked {
+                    nest.effect_mut("opacity").unwrap().masks.push(Mask::new("generated mask", MaskPath::rect(12.5, 9.0, 60.0, 48.0)));
+                }
+                project.sequence_mut(outer).unwrap().video_tracks[0].items.push(nest);
+                let options = RenderOptions { scale, ..Default::default() };
+                let time = FrameRate::FPS_24.tick_of(12);
+                let plan = filmcraft_render::plan::plan_frame(&project, outer, time, options, &sources);
+                let FramePlan::Layers { layers, .. } = &plan else { panic!("expected nested plan") };
+                assert_eq!(layers.len(), 1);
+                if rotation == 0.0 {
+                    assert_ne!(layers[0].matrix, Affine::IDENTITY);
+                } else {
+                    assert_eq!(layers[0].matrix, Affine::IDENTITY, "visible rotated edges retain CPU placement");
+                }
+                let cpu = filmcraft_render::render_sequence(&project, outer, time, options, &sources).over_black_rgba8();
+                compositor.composite(&plan);
+                let (_, _, gpu) = compositor.read_output().expect("nested readback");
+                assert_eq!(cpu.len(), gpu.len());
+                let mut diffs: Vec<u32> = cpu
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(gpu.as_chunks::<4>().0.iter())
+                    .map(|(a, b)| (0..3).map(|i| u32::from(a[i].abs_diff(b[i]))).max().unwrap())
+                    .collect();
+                diffs.sort_unstable();
+                let p99 = diffs[diffs.len() * 99 / 100];
+                let mean = diffs.iter().sum::<u32>() as f64 / diffs.len() as f64;
+                assert!(p99 <= 6 && mean < 1.5, "scale={scale} mask={masked} motion={motion_scale} rotation={rotation}: p99={p99} mean={mean}");
+                eprintln!("native nested placement executed scale={scale} mask={masked} motion={motion_scale} rotation={rotation} p99={p99} mean={mean}");
+            }
+        }
+    }
+}
+
+#[test]
+fn upload_eviction_never_removes_an_earlier_layer_of_the_current_batch() {
+    let Some((dev, queue)) = device() else {
+        eprintln!("no GPU adapter; skipping batch eviction regression");
+        return;
+    };
+    let mut compositor = GpuCompositor::new(&dev, &queue);
+    let mut layers = vec![PlanLayer::new(Arc::new(VideoFrame::rgba_f32(1, 1, vec![1.0, 0.0, 0.0, 1.0])), Affine::IDENTITY, 1.0, Blend::Normal)];
+    for _ in 0..24 {
+        layers.push(PlanLayer::new(Arc::new(VideoFrame::rgba_f32(1, 1, vec![0.0; 4])), Affine::IDENTITY, 1.0, Blend::Normal));
+    }
+    let plan = FramePlan::Layers { width: 1, height: 1, layers };
+    compositor.composite(&plan);
+    let (_, _, actual) = compositor.read_output().expect("batch eviction readback");
+    assert_eq!(actual, execute_cpu(&plan).over_black_rgba8(), "the first red layer must survive upload of 24 later transparent layers");
+}
+
+#[test]
+fn upload_cache_accounts_for_bytes_and_evicts_to_its_budget() {
+    let Some((dev, queue)) = device() else {
+        eprintln!("no GPU adapter; skipping upload budget regression");
+        return;
+    };
+    let mut compositor = GpuCompositor::new(&dev, &queue);
+    let first = VideoFrame::rgba_f32(1, 1, vec![0.2, 0.1, 0.0, 1.0]);
+    let second = VideoFrame::rgba_f32(1, 1, vec![0.0, 0.1, 0.2, 1.0]);
+    let old = compositor.upload(&first, None);
+    let recent = compositor.upload(&second, None);
+    // 16 CPU bytes retained plus 8 bytes uploaded as RGBA16Float.
+    assert_eq!(compositor.uploads[&old].retained_bytes, 24);
+    assert_eq!(compositor.uploads[&recent].retained_bytes, 24);
+    compositor.trim_uploads(24);
+    assert_eq!(compositor.uploads.len(), 1);
+    assert!(compositor.uploads.contains_key(&recent));
+    assert!(!compositor.uploads.contains_key(&old));
+    compositor.trim_uploads(23);
+    assert!(compositor.uploads.is_empty(), "an individually oversized upload must not stay cached");
+}

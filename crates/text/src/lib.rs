@@ -18,6 +18,7 @@
 pub mod fonts;
 pub mod layout;
 pub mod mask;
+pub mod preview;
 pub mod raster;
 pub mod render;
 pub mod sfnt;

@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** trivial (status line, revision history and roadmap link added; content checked against the crate list) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-10-29 (implementation audit; parity estimates 2026-10-10) · **Last updated:** 2026-10-29 · **Change:** major (local consolidation, safety boundaries and current qualification evidence) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 FilmCraft is a Cargo workspace of small crates with strictly enforced layering. The engine is
 headless: every feature can be reached without a window, and the egui UI is one client among the
@@ -152,8 +152,11 @@ EffectInstance
 
 - **Graphic clips** ([graphics.md](graphics.md)) reference a `Graphic` canvas item; their text and
   shape layers are hidden `graphic_text` / `graphic_shape` effect instances on the track item.
-- Everything is plain serde data. `Sequence::check()` validates the invariants (no overlaps, unique
-  ids), and the engine runs it after every sequence edit.
+- Everything is plain serde data. `Sequence::check()` validates bounds, overlap rules and unique
+  track/clip/caption identities within that sequence. Generic edit candidates and file/history
+  loading also validate identities. Separate sequence copies may retain their internal ids because
+  lookup is scoped to the sequence. Older harmless overlaps remain loadable; ambiguous identities
+  return an actionable error before editing.
 - Timeline positions are sequence ticks; `source_in` and keyframes are in media time, so trims and
   splits never move keyframes.
 - **Effect definitions are data.** `project::effect::effect_defs()` lists every video effect,
@@ -161,6 +164,12 @@ EffectInstance
   Controls rows and the parameter docs agents see are all generated from it.
 - **Project files** (`.fcproj`) are the project serialised as JSON. Saves are atomic: write a
   temporary sibling file, then rename it over the target.
+- Save As stages its destination-derived name and adopts it only after publication succeeds.
+  Rejected edit groups restore revision, cleanliness, history, merge state and recorded commands;
+  intermediate group states are withheld from persistence and live preview publication.
+- Native project and recovery reads are bounded before allocation by the 256 MiB project-file
+  limit. LUTs use their existing text limit; recovery metadata and preferences have smaller limits.
+  Streaming hosts expose bounded readers; already-resident host buffers are checked before decoding.
 
 ## 4. Command system (`filmcraft-engine`)
 

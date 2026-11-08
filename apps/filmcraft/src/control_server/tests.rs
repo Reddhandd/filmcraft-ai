@@ -2,6 +2,36 @@ use super::*;
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+#[test]
+fn ordinary_desktop_bridge_uses_distinct_credentials_and_bound_ports() {
+    let (port, token, rx) = start_private(egui::Context::default()).unwrap();
+    let (other_port, other_token, _other_rx) = start_private(egui::Context::default()).unwrap();
+    assert_ne!(port, 0);
+    assert_ne!(port, other_port);
+    assert_ne!(token, other_token);
+    assert_eq!(token.len(), 64);
+    assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert!(TcpListener::bind(("127.0.0.1", port)).is_err(), "the selected port remains reserved");
+
+    let mut wrong = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    wrong.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    writeln!(wrong, "{}", json!({"id":1,"method":"ui.inspect","token":other_token})).unwrap();
+    let mut rejected = String::new();
+    BufReader::new(wrong).read_line(&mut rejected).unwrap();
+    assert!(rejected.contains("control authentication failed"));
+    assert!(rx.try_recv().is_err(), "another app's credential must never reach the UI");
+
+    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    writeln!(client, "{}", json!({"id":2,"method":"ui.inspect","token":token})).unwrap();
+    let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(request.method, "ui.inspect");
+    request.reply.send(json!({"ok":true,"result":{"private":true}})).unwrap();
+    let mut reply = String::new();
+    BufReader::new(client).read_line(&mut reply).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&reply).unwrap(), json!({"id":2,"ok":true,"result":{"private":true}}));
+}
+
 fn run(input: &[u8]) -> (Vec<Value>, Vec<String>) {
     let mut out = Vec::new();
     let mut calls = Vec::new();

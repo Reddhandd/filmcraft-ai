@@ -136,6 +136,52 @@ impl Driver {
     }
 }
 
+#[test]
+fn transition_clipboard_menu_bulk_paste_and_undo() {
+    let mut driver = Driver::demo();
+    let before = driver.exec("sequence.inspect", json!({}));
+    let clips = before["video"][0]["items"].as_array().unwrap();
+    let source = driver.crossing();
+    driver.click(&format!("timeline.transition.{}", source.id));
+    assert_eq!(driver.exec("sequence.inspect", json!({}))["transitionSelection"], json!([source.id]));
+    driver.ok("ui.menu.invoke", json!({"id": "edit.copy"}));
+
+    let destinations: Vec<u64> = [3, 4].into_iter().map(|index| clips[index]["clip"].as_u64().unwrap()).collect();
+    driver.exec("trim.selectEditPoint", json!({"clip": destinations[0], "edge": "in"}));
+    driver.exec("trim.selectEditPoint", json!({"clip": destinations[1], "edge": "in", "add": true}));
+    driver.ok("ui.set", json!({"focused": "Timeline"}));
+    let pasted = driver.ok("ui.menu.invoke", json!({"id": "edit.paste"}));
+    assert_eq!(pasted["pasted"], json!(2));
+    let after = driver.exec("sequence.inspect", json!({}));
+    assert_eq!(after["video"][0]["items"], before["video"][0]["items"]);
+    for (destination, id) in destinations.iter().zip(pasted["transitions"].as_array().unwrap()) {
+        assert!(after["video"][0]["transitions"].as_array().unwrap().iter().any(|transition| transition["id"] == *id && transition["to"] == *destination));
+    }
+    driver.ok("ui.menu.invoke", json!({"id": "edit.undo"}));
+    assert_eq!(driver.exec("sequence.inspect", json!({}))["video"][0]["transitions"], before["video"][0]["transitions"]);
+    driver.ok("ui.menu.invoke", json!({"id": "edit.redo"}));
+    assert_eq!(driver.exec("sequence.inspect", json!({}))["video"][0]["transitions"], after["video"][0]["transitions"]);
+}
+
+#[test]
+fn transition_clipboard_shortcuts_replace_selected_cut() {
+    let mut driver = Driver::demo();
+    let before = driver.exec("sequence.inspect", json!({}));
+    let source = driver.crossing();
+    let destination = before["video"][0]["items"][3]["clip"].as_u64().unwrap();
+    driver.ok("ui.set", json!({"focused": "Timeline"}));
+    driver.click(&format!("timeline.transition.{}", source.id));
+    driver.ok("ui.key", json!({"key": "Cmd+C"}));
+    driver.exec("trim.selectEditPoint", json!({"clip": destination, "edge": "in"}));
+    driver.ok("ui.key", json!({"key": "Cmd+V"}));
+    let after = driver.exec("sequence.inspect", json!({}));
+    assert_eq!(after["video"][0]["items"], before["video"][0]["items"]);
+    let pasted = after["video"][0]["transitions"].as_array().unwrap().iter().find(|transition| transition["to"] == destination).unwrap();
+    assert_ne!(pasted["id"], json!(source.id));
+    let original = before["video"][0]["transitions"].as_array().unwrap().iter().find(|transition| transition["id"] == source.id).unwrap();
+    assert_eq!(pasted["effect"], original["effect"]);
+}
+
 /// Ticks in one frame of `rate`.
 fn frame_ticks((num, den): (i64, i64)) -> i64 {
     254_016_000_000 * den / num
@@ -175,6 +221,48 @@ fn click_selects_a_transition_and_delete_removes_it() {
     d.exec("timeline.select", json!({"transitions": [c.id]}));
     d.exec("timeline.select", json!({"clips": [clip]}));
     assert_eq!(d.exec("sequence.inspect", json!({}))["transitionSelection"], json!([]));
+}
+
+#[test]
+fn repeated_clicks_reach_each_overlapping_transition_and_edit_the_selected_type() {
+    let mut d = Driver::demo();
+    let first = d.crossing();
+    let q = d.exec("sequence.inspect", json!({}));
+    let incoming = &q["video"][0]["items"][2];
+    let second_cut = incoming["start"].as_i64().unwrap();
+    let second = d.exec("sequence.applyVideoTransition", json!({"clip": incoming["clip"], "edge": "in", "effect": "Push", "frames": 24}))["transition"]
+        .as_u64()
+        .unwrap();
+    let frame = frame_ticks(d.rate());
+    let first_start = first.cut - 12 * frame;
+    d.exec("sequence.setTransition", json!({"transition": first.id, "start": first_start, "duration": second_cut - first_start}));
+    let original = d.transition(first.id).unwrap();
+    let (x, y, w, h, _) = d.find(&format!("timeline.transition.{second}")).unwrap();
+    let overlap = json!({"x": x + w * 0.25, "y": y + h / 2.0});
+
+    d.ok("ui.click", overlap.clone());
+    d.frames(40); // separate clicks, so this is a selection cycle rather than a double click
+    assert_eq!(d.exec("sequence.inspect", json!({}))["transitionSelection"], json!([second]));
+    assert_eq!(d.ok("ui.timeline.hit", overlap.clone())["transition"], second);
+    d.ok("ui.click", overlap.clone());
+    d.frames(3);
+    assert_eq!(d.exec("sequence.inspect", json!({}))["transitionSelection"], json!([first.id]));
+    assert_eq!(d.ok("ui.timeline.hit", overlap.clone())["transition"], first.id);
+    let mut right_click = overlap;
+    right_click["button"] = json!("right");
+    d.ok("ui.click", right_click);
+    d.frames(3);
+    d.click("timeline.transitionMenu.editSettings");
+    assert_eq!(d.label("effectControls.transition.type"), "Cross Dissolve", "Effect Controls follows the cycled selection");
+
+    d.click("effectControls.transition.type");
+    d.click("effectControls.transition.type.option.additive_dissolve");
+    let edited = d.transition(first.id).unwrap();
+    assert_eq!(edited["effect"], "additive_dissolve", "{}", d.harness.state().ui.status);
+    assert_eq!(edited["start"], original["start"], "changing type preserves the custom offset");
+    assert_eq!(edited["duration"], original["duration"]);
+    assert_eq!(d.transition(second).unwrap()["effect"], "push", "the neighbouring transition stays separate");
+    assert_eq!(d.exec("sequence.inspect", json!({}))["transitionSelection"], json!([first.id]));
 }
 
 /// Dragging a transition's end trims that end only (#224); dragging its middle slides it over the

@@ -7,6 +7,26 @@ pub(super) type DuplicatesKey = (u64, ItemId, usize);
 
 pub(super) type DuplicateMarkers = Arc<HashMap<ClipId, DuplicateFrames>>;
 
+struct DuplicateJob {
+    running: Arc<std::sync::atomic::AtomicBool>,
+    ctx: egui::Context,
+}
+
+impl DuplicateJob {
+    fn acquire(running: &Arc<std::sync::atomic::AtomicBool>, ctx: &egui::Context) -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        running.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).ok()?;
+        Some(Self { running: running.clone(), ctx: ctx.clone() })
+    }
+}
+
+impl Drop for DuplicateJob {
+    fn drop(&mut self) {
+        self.running.store(false, std::sync::atomic::Ordering::Release);
+        self.ctx.request_repaint();
+    }
+}
+
 /// The duplicate frame markers of sequence `seq_id`, worked out again on a background thread
 /// after the project changes: a long sequence takes too long for a frame. Until the new markers
 /// are ready, the last ones of the same sequence are shown.
@@ -17,23 +37,36 @@ pub(super) fn duplicate_markers(app: &mut FilmcraftApp, ctx: &egui::Context, seq
     if let Some((k, d)) = done
         && app.tl.duplicates.as_ref().is_none_or(|(have, _)| *have != key)
     {
-        app.tl.duplicates = Some((k, d));
+        let markers = match d {
+            Ok(markers) => markers,
+            Err(error) => {
+                app.session.error_toast("timeline", error);
+                Arc::default()
+            }
+        };
+        app.tl.duplicates = Some((k, markers));
     }
     match &app.tl.duplicates {
         Some((k, d)) if *k == key => return d.clone(),
         _ => {}
     }
-    if app.tl.duplicates_pending != Some(key) {
+    if app.tl.duplicates_pending != Some(key)
+        && let Some(job) = DuplicateJob::acquire(&app.tl.duplicates_running, ctx)
+    {
         app.tl.duplicates_pending = Some(key);
         let (project, seq, slot, ctx) = (app.session.project.clone(), seq.clone(), app.tl.duplicates_done.clone(), ctx.clone());
         let run = move || {
-            // a panic in the comparison must not take the app down: it leaves no markers
-            let d = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| duplicate_frames(&project, &seq))).unwrap_or_default();
-            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, Arc::new(d.into_iter().map(|d| (d.clip, d)).collect())));
+            let _job = job;
+            let d = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| duplicate_frames(&project, &seq)))
+                .map(|d| Arc::new(d.into_iter().map(|d| (d.clip, d)).collect()))
+                .map_err(|_| "Duplicate frame analysis failed; change the sequence to retry".to_string());
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, d));
             ctx.request_repaint();
         };
         #[cfg(not(target_arch = "wasm32"))]
-        std::thread::spawn(run);
+        if let Err(error) = std::thread::Builder::new().name("duplicate-frames".into()).spawn(run) {
+            app.session.error_toast("timeline", format!("Cannot start duplicate frame analysis: {error}"));
+        }
         #[cfg(target_arch = "wasm32")]
         run();
     }
@@ -339,5 +372,32 @@ pub(super) fn draw_transition(p: &egui::Painter, r: Rect, trn: &filmcraft_projec
         let tr = Rect::from_min_size(r.min + vec2(2.0, 2.0), vec2((r.width() - 4.0).min(80.0), 13.0));
         cp.rect_filled(tr, 0.0, Color32::from_black_alpha(170));
         cp.text(pos2(tr.min.x + 3.0, tr.center().y), Align2::LEFT_CENTER, name, Tokens::ui(10.5), Color32::from_rgb(0xd9, 0xd9, 0xd9));
+    }
+}
+
+#[cfg(test)]
+mod duplicate_job_tests {
+    use super::*;
+
+    #[test]
+    fn pending_revisions_and_cache_resets_cannot_accumulate_jobs_and_panics_release_the_slot() {
+        let running = Arc::default();
+        let ctx = egui::Context::default();
+        let job = DuplicateJob::acquire(&running, &ctx).unwrap();
+        for _ in 0..1000 {
+            assert!(DuplicateJob::acquire(&running, &ctx).is_none());
+        }
+        // A cache reset retains the same running flag, even while discarding result slots.
+        let mut state = TlState { duplicates_running: running.clone(), ..Default::default() };
+        state.reset_media_caches();
+        assert!(DuplicateJob::acquire(&state.duplicates_running, &ctx).is_none());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _job = job;
+                panic!("injected duplicate analysis failure");
+            }))
+            .is_err()
+        );
+        assert!(DuplicateJob::acquire(&running, &ctx).is_some(), "a failed job must release its worker reservation");
     }
 }

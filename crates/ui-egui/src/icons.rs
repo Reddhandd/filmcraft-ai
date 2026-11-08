@@ -48,6 +48,11 @@ pub enum Icon {
     Unlock,
     SyncLock,
     Mic,
+    MicOff,
+    Save,
+    Notebook,
+    Paperclip,
+    Power,
     Folder,
     Film,
     Sequence,
@@ -458,10 +463,36 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.arc(8.0, 7.0, 3.0, 180.0, 360.0);
             pen.line(&[(5.5, 10.5), (7.0, 12.0), (10.5, 9.0)]);
         }
-        Mic => {
+        Mic | MicOff => {
             pen.rect(6.0, 2.0, 10.0, 10.0);
             pen.arc(8.0, 8.0, 4.5, 0.0, 180.0);
             pen.line(&[(8.0, 12.5), (8.0, 14.5)]);
+            if icon == MicOff {
+                pen.line(&[(2.0, 2.0), (14.0, 14.0)]);
+            }
+        }
+        Save => {
+            pen.closed(&[(2.0, 2.0), (11.0, 2.0), (14.0, 5.0), (14.0, 14.0), (2.0, 14.0)]);
+            pen.rect(5.0, 2.0, 10.0, 6.0);
+            pen.rect(5.0, 9.0, 11.0, 14.0);
+        }
+        Notebook => {
+            pen.rect(3.0, 2.0, 13.0, 14.0);
+            pen.line(&[(5.0, 2.0), (5.0, 14.0)]);
+            for y in [5.0, 8.0, 11.0] {
+                pen.line(&[(7.0, y), (11.0, y)]);
+            }
+        }
+        Paperclip => {
+            pen.line(&[(6.0, 5.0), (6.0, 11.0)]);
+            pen.arc(8.0, 11.0, 2.0, 180.0, 0.0);
+            pen.line(&[(10.0, 11.0), (10.0, 4.0)]);
+            pen.arc(7.0, 4.0, 3.0, 0.0, -180.0);
+            pen.line(&[(4.0, 4.0), (4.0, 10.0)]);
+        }
+        Power => {
+            pen.arc(8.0, 8.5, 5.0, -50.0, 230.0);
+            pen.line(&[(8.0, 1.5), (8.0, 7.0)]);
         }
         Folder => pen.closed(&[(1.5, 4.0), (6.0, 4.0), (7.5, 5.5), (14.5, 5.5), (14.5, 13.0), (1.5, 13.0)]),
         Film => {
@@ -848,6 +879,11 @@ mod tests {
         Unlock,
         SyncLock,
         Mic,
+        MicOff,
+        Save,
+        Notebook,
+        Paperclip,
+        Power,
         Folder,
         Film,
         Sequence,

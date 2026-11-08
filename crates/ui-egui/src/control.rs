@@ -45,6 +45,8 @@ fn bounded_repetitions(params: &Value, key: &str, default: u64, minimum: u64, ma
     Ok(value.max(minimum))
 }
 
+mod capture_output;
+mod provider;
 use crate::FilmcraftApp;
 use crate::dock::PanelKind;
 use crate::state::{Mode, PlaybackRes, ThumbnailMode, Tool};
@@ -71,6 +73,11 @@ pub enum Outcome {
     Retry(String),
     /// Reply once queued synthetic input has been processed.
     AfterInput,
+    ScreenshotInline {
+        crop: Option<crate::capture::CropTarget>,
+        max_side: u32,
+        range: Option<[i64; 2]>,
+    },
     Screenshot {
         path: Option<String>,
         /// Resolved to fresh geometry at issue time, not here.
@@ -120,16 +127,28 @@ fn point(app: &FilmcraftApp, p: &Value) -> Result<egui::Pos2, String> {
 /// Execute one control request. Synthetic input is capped by `MAX_SYNTHETIC_EVENTS` before queueing, screenshot crops stay symbolic until capture, and
 /// `gfxEdit` layer identity is resolved from the document.
 pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
+    if req.method == "provider.external" {
+        return provider::external(app, req);
+    }
+    if req.method == "provider.execute" {
+        return provider::dispatch(app, ctx, req);
+    }
     let p = &req.params;
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     if matches!(req.method.as_str(), "ui.click" | "ui.move" | "ui.drag" | "ui.scroll" | "ui.key" | "ui.type") && app.synthetic.len() >= MAX_SYNTHETIC_EVENTS {
         return err("too many synthetic input events are queued; wait for the current input to be processed");
     }
     match req.method.as_str() {
+        "controller.capabilities" => ok(
+            json!({"guarded_clip_delete":true,"guarded_clip_move":true,"guarded_audio_place":true,"guarded_audio_track_mute":true,"guarded_transition_add":true,"guarded_single_nest":true,"guarded_performance_match":true,"guarded_color_preset":true,"guarded_video_effect":true,"guarded_effect_param":true,"guarded_effect_param_scalar":true,"guarded_effect_keyframe":true,"guarded_effect_keyframe_edit":true,"guarded_effect_keyframe_remove":true,"guarded_effect_keyframe_interpolation":true,"guarded_effect_keyframe_move":true,"guarded_effect_remove":true}),
+        ),
         "engine.execute" | "ui.menu.invoke" => {
             let Some(id) = s("command").or(s("id")) else { return err("missing `command`") };
             let params = p.get("params").cloned().unwrap_or(json!({}));
-            match crate::menus::invoke(app, ctx, id, params) {
+            let diagnostic = crate::console::diagnostics::begin(app, id, &params);
+            let result = crate::menus::invoke(app, ctx, id, params);
+            crate::console::diagnostics::finish(app, diagnostic, &result);
+            match result {
                 Ok(v) => ok(v),
                 Err(e) => err(e),
             }
@@ -504,7 +523,7 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
             }
             ok(json!({"playing": app.playback.playing, "playhead": app.session.playhead().0}))
         }
-        "ui.screenshot" => {
+        "ui.screenshot" | "ui.screenshot.inline" => {
             // Keep the target symbolic: the crop must come from the layout that is actually
             // captured, not from whatever the registry held when this control request arrived.
             let crop = if let Some(panel) = s("panel") {
@@ -513,9 +532,45 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
             } else {
                 s("id").map(|id| crate::capture::CropTarget::Element(id.to_string()))
             };
+            let inline = match p.get("inline") {
+                None | Some(Value::Null) => req.method == "ui.screenshot.inline",
+                Some(Value::Bool(value)) => *value,
+                _ => return err("inline must be boolean"),
+            };
+            if req.method == "ui.screenshot.inline" && !inline {
+                return err("ui.screenshot.inline requires inline delivery");
+            }
+            if inline && p.get("path").is_some_and(|v| !v.is_null()) {
+                return err("Choose inline delivery or an explicit file path, not both");
+            }
+            let max_side = match p.get("maxSide") {
+                None | Some(Value::Null) => 1600,
+                Some(value) => match value.as_u64().filter(|v| (64..=4096).contains(v)) {
+                    Some(value) => value as u32,
+                    None => return err("maxSide must be an integer from 64 to 4096"),
+                },
+            };
+            let range = match p.get("range") {
+                None | Some(Value::Null) => None,
+                Some(value) => {
+                    let Some(values) = value.as_array().filter(|values| values.len() == 2) else {
+                        return err("range must contain two integer ticks");
+                    };
+                    let (Some(start), Some(end)) = (values.first().and_then(Value::as_i64), values.get(1).and_then(Value::as_i64)) else {
+                        return err("range must contain two integer ticks");
+                    };
+                    if start < 0 || start >= end {
+                        return err("range requires 0 <= start < end");
+                    }
+                    if !inline || !crop.as_ref().is_some_and(crate::capture::CropTarget::is_timeline) {
+                        return err("range requires an inline Timeline panel capture");
+                    }
+                    Some([start, end])
+                }
+            };
             // Bring the window on screen so a frame is presented, without taking keyboard focus.
             app.raise_for_control(ctx);
-            Outcome::Screenshot { path: s("path").map(str::to_string), crop }
+            if inline { Outcome::ScreenshotInline { crop, max_side, range } } else { Outcome::Screenshot { path: s("path").map(str::to_string), crop } }
         }
         "ui.resize" => {
             let w = p.get("width").and_then(Value::as_f64).unwrap_or(1600.0) as f32;
@@ -596,6 +651,9 @@ pub fn inspect(app: &FilmcraftApp, ctx: &egui::Context) -> Value {
         "input": {"mode": if app.control_input_only { "controlOnly" } else { "interactive" },
             "nativeWindowFocused": app.native_window_focused, "effectiveWindowFocused": ctx.input(|input| input.focused)},
         "ui": app.ui,
+        "requestDiagnostics": app.ui.console.diagnostics.json(),
+        "audioOutputNote": app.audio.as_ref().and_then(|audio| audio.note()),
+        "console": {"memoryPath": app.ui.console.sessions.project.as_ref().map(|p|format!("{p}.console/memory.md")), "activeThread":app.ui.console.sessions.active, "lockedCodexThread":app.ui.console.session_lock.thread_id, "codexSessionLockError":app.ui.console.session_lock.error, "savedSessions":app.ui.console.sessions.records.iter().map(|r|json!({"threadId":r.thread_id,"title":r.title,"updated":r.updated,"model":r.model})).collect::<Vec<_>>(), "open": app.ui.console.open, "settingsOpen":app.ui.console.settings_open, "codex": app.ui.console.connection.id(), "busy": app.ui.console.chat.busy, "voice": app.ui.console.chat.voice.id(), "voiceTiming": app.ui.console.chat.voice_timing, "microphoneMuted": app.ui.console.chat.voice_muted, "voiceInput":app.ui.console.chat.voice_input, "voiceInputChannel":app.ui.console.voice_channel.saturating_add(1), "voiceInputMode":if app.session.prefs.general.codex_voice_echo_reduction {"speakers"} else {"headphones"}, "speakingVoice":app.session.prefs.general.codex_speaking_voice, "speakingVoices":app.ui.console.chat.voices, "speakingVoiceCatalogError":app.ui.console.chat.voice_catalog_error, "speakingVoiceCatalogPending":app.ui.console.chat.voice_catalog_pending, "voiceSentFrames":app.ui.console.chat.voice_sent, "voiceReceivedFrames":app.ui.console.chat.voice_received, "inspectionCount": app.ui.console.chat.inspection_count, "model": app.ui.console.chat.selected_model, "defaultModel": app.ui.console.chat.default_model, "models": app.ui.console.chat.models.iter().map(|m|json!({"id":m.id,"label":m.label})).collect::<Vec<_>>(), "pendingEdit": app.ui.console.chat.pending.is_some(), "messages": app.ui.console.chat.transcript()},
         "sourcePlayback": {"playing": app.source_playback.clock.playing, "audioClock": app.source_playback.clock.audio_clock, "playhead": app.session.state.source_playhead.0},
         "playback": {"playing": app.playback.playing, "speed": app.playback.speed, "loop": app.playback.looping, "audioClock": app.playback.audio_clock, "dropped": app.playback.meter.counts().1, "shown": app.playback.meter.counts().0, "preroll": app.playback.preroll.is_some()},
         "playhead": app.session.playhead().0,
@@ -643,17 +701,10 @@ pub fn save_screenshot_with_ppp(image: &egui::ColorImage, path: Option<&str>, cr
         Ok(rect) => rect,
         Err(e) => return json!({"ok": false, "error": e}),
     };
-    let [w, _] = image.size;
-    let Some(capacity) = cw.checked_mul(ch).and_then(|pixels| pixels.checked_mul(std::mem::size_of::<egui::Color32>())) else {
-        return json!({"ok": false, "error": "screenshot crop size overflows the image buffer"});
+    let rgba = match capture_output::crop_rgba(image, (x0, y0, cw, ch)) {
+        Ok(rgba) => rgba,
+        Err(error) => return json!({"ok":false,"error":error}),
     };
-    let mut rgba = Vec::with_capacity(capacity);
-    for y in y0..y0 + ch {
-        for x in x0..x0 + cw {
-            let c = image.pixels[y * w + x];
-            rgba.extend_from_slice(&[c.r(), c.g(), c.b(), 255]);
-        }
-    }
     if cfg!(target_arch = "wasm32") {
         // No filesystem on the web: the PNG comes back in the reply.
         return match encode_png(&rgba, cw as u32, ch as u32) {
@@ -663,11 +714,19 @@ pub fn save_screenshot_with_ppp(image: &egui::ColorImage, path: Option<&str>, cr
     }
     let path = path.map(str::to_string).unwrap_or_else(|| filmcraft_engine::temp_dir().join("filmcraft-screenshot.png").to_string_lossy().to_string());
     match encode_png(&rgba, cw as u32, ch as u32) {
-        Ok(png) => match std::fs::write(&path, png) {
+        Ok(png) => match filmcraft_format::atomic::atomic_write(std::path::Path::new(&path), &png) {
             Ok(()) => json!({"ok": true, "result": {"path": path, "width": cw, "height": ch}}),
             Err(e) => json!({"ok": false, "error": e.to_string()}),
         },
         Err(e) => json!({"ok": false, "error": e}),
+    }
+}
+
+/// Return bounded PNG pixels without requiring temporary disk space.
+pub fn inline_screenshot_with_ppp(image: &egui::ColorImage, crop: Option<[f32; 4]>, ppp: f32, max_side: u32) -> Value {
+    match capture_output::inline(image, crop, ppp, max_side) {
+        Ok(result) => json!({"ok":true,"result":result}),
+        Err(error) => json!({"ok":false,"error":error}),
     }
 }
 
@@ -746,6 +805,41 @@ pub fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod input_bounds_tests {
+    #[test]
+    fn focused_timeline_capture_uses_the_real_panel_identity() {
+        let ctx = egui::Context::default();
+        let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
+        let (request, _) = ControlRequest::new("ui.screenshot.inline", json!({"panel":"Timeline","range":[0,254016000000_i64]}));
+        let Outcome::ScreenshotInline { crop: Some(crop), range: Some(range), .. } = handle(&mut app, &ctx, &request) else {
+            panic!("valid Timeline range must be admitted through actual panel-name resolution");
+        };
+        assert_eq!(range, [0, 254016000000]);
+        let crate::capture::CropTarget::Element(id) = crop;
+        assert_eq!(id, format!("panel.{}", PanelKind::Timeline.id()));
+    }
+
+    #[test]
+    fn inline_capture_refuses_hostile_dimensions_and_ambiguous_file_output() {
+        let ctx = egui::Context::default();
+        let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
+        for params in [
+            json!({"inline":1}),
+            json!({"inline":true,"path":"must-not-write.png"}),
+            json!({"inline":true,"maxSide":-1}),
+            json!({"inline":true,"maxSide":u64::MAX}),
+            json!({"inline":true,"panel":"Timeline","range":[1,1]}),
+            json!({"inline":true,"panel":"Timeline","range":[-1,2]}),
+            json!({"inline":true,"panel":"Timeline","range":[0,1.5]}),
+            json!({"inline":true,"panel":"Timeline","range":[0,1,2]}),
+            json!({"inline":true,"panel":"Program","range":[0,2]}),
+        ] {
+            let (request, _) = ControlRequest::new("ui.screenshot", params);
+            let Outcome::Done(reply) = handle(&mut app, &ctx, &request) else { panic!("hostile capture was admitted") };
+            assert_eq!(reply["ok"], false);
+        }
+        let (request, _) = ControlRequest::new("ui.screenshot", json!({"inline":true,"panel":"Timeline","maxSide":960}));
+        assert!(matches!(handle(&mut app, &ctx, &request), Outcome::ScreenshotInline { max_side: 960, .. }));
+    }
     use super::*;
 
     /// Create an empty editor session for inspecting queued synthetic input without a window.
