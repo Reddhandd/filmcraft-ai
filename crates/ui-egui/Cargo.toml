@@ -48,7 +48,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 
 # PDF reference text extraction (MIT); bounded load and decompression APIs.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.lopdf]
-version = "=0.45.0"
+version = "=0.47.0"
 default-features = false
 
 # Thread/process CPU clocks for frame-job profiling (safe wrappers; see frames.rs).
@@ -79,14 +79,14 @@ toml = "1"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 getrandom = "0.4"
 # Bounded EPUB ZIP/XML import; pure-Rust deflate, no scripts or external resource loading.
-zip = { version = "=7.4.0", default-features = false, features = ["deflate"] }
+zip = { version = "=9.1.0", default-features = false, features = ["deflate"] }
 roxmltree = { workspace = true }
 redb = "=4.5.0"
 # Pure-Rust requested-page rendering; no bundled fallback fonts or external CMaps.
 hayro = { version = "=0.9.0", default-features = false }
 # Pure-Rust inference for separately downloaded, checksummed CC-BY-SA OCR weights.
 ocrs = { version = "=0.13.1", default-features = false, features = ["rten"] }
-rten = { version = "=0.26.0", default-features = false, features = ["onnx_format"] }
+rten = { version = "=0.27.0", default-features = false, features = ["onnx_format"] }
 craft-update = { workspace = true }
 # Public model downloads use the same pure-Rust TLS provider as local speech models.
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
